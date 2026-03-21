@@ -67,6 +67,14 @@ class PipelineConfig:
     # Timeline
     timeline_merge_gap: float = 2.0   # seconds; merge same-speaker gaps
     min_span_duration: float = 0.5    # drop spans shorter than this
+    # WebEx visual-lag compensation: mic appears ~300ms after speech starts,
+    # clears ~200ms after speech ends.  Both values expand detected spans.
+    timeline_onset_pad: float = 0.3
+    timeline_offset_pad: float = 0.2
+    # Temporal smoothing: majority-vote window over N consecutive frames
+    timeline_smoothing_window: int = 3
+    # Alignment boundary tolerance: widens per-segment speaker lookup (seconds)
+    alignment_boundary_tolerance: float = 0.4
 
     # Alignment
     alignment_merge_gap: float = 1.5  # seconds; merge same-speaker segments
@@ -247,6 +255,9 @@ def _run_pipeline(
             frame_interval=config.frame_interval,
             min_span_duration=config.min_span_duration,
             merge_gap=config.timeline_merge_gap,
+            onset_pad=config.timeline_onset_pad,
+            offset_pad=config.timeline_offset_pad,
+            smoothing_window=config.timeline_smoothing_window,
         )
         progress.update(timeline_task, completed=1, total=1,
                         description=f"[green]Timeline: {len(timeline)} spans")
@@ -259,6 +270,7 @@ def _run_pipeline(
             transcription_result,
             timeline,
             merge_gap=config.alignment_merge_gap,
+            boundary_tolerance=config.alignment_boundary_tolerance,
         )
         progress.update(align_task, completed=1, total=1,
                         description=f"[green]Aligned: {len(utterances)} utterances")

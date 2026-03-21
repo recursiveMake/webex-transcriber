@@ -87,6 +87,21 @@ class TestAlign:
         utterances = align(result, timeline)
         assert "Bob" in utterances[0].speakers
 
+    def test_boundary_tolerance_catches_slightly_late_span(self):
+        # Segment starts at 5.0, but speaker span starts at 5.3 (visual lag).
+        # With boundary_tolerance=0.4, the span at 5.3 should still be matched.
+        result = _result(_seg("Hello.", 5.0, 7.0))
+        timeline = [_span(5.3, 9.0, "Alice")]
+        utterances = align(result, timeline, boundary_tolerance=0.4)
+        assert utterances[0].speakers == ["Alice"]
+
+    def test_boundary_tolerance_zero_misses_late_span(self):
+        # With zero tolerance, a span that starts after the segment should not match
+        result = _result(_seg("Hello.", 5.0, 5.5))
+        timeline = [_span(6.0, 9.0, "Alice")]
+        utterances = align(result, timeline, boundary_tolerance=0.0)
+        assert utterances[0].speakers == ["Unknown"]
+
     def test_utterance_timestamps(self):
         result = _result(_seg("Hello.", 65.0, 67.5))
         timeline = [_span(60.0, 70.0, "Alice")]

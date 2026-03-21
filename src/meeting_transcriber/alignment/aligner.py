@@ -49,6 +49,7 @@ def align(
     timeline: list[SpeakerSpan],
     *,
     merge_gap: float = 1.5,
+    boundary_tolerance: float = 0.4,
 ) -> list[Utterance]:
     """Attribute each Whisper segment to a speaker and merge into utterances.
 
@@ -57,6 +58,9 @@ def align(
         timeline: Speaker activity spans from the visual detector.
         merge_gap: Consecutive segments from the same speaker(s) are merged
             if their gap is at most this many seconds.
+        boundary_tolerance: Passed to ``speakers_for_segment``; widens the
+            per-segment lookup window to absorb timing drift between Whisper
+            and the visual speaker timeline.
 
     Returns:
         Sorted list of Utterance objects.
@@ -67,7 +71,10 @@ def align(
     # Assign speaker(s) to each segment
     attributed: list[tuple[list[str], Segment]] = []
     for seg in transcription.segments:
-        names = speakers_for_segment(timeline, seg.start, seg.end)
+        names = speakers_for_segment(
+            timeline, seg.start, seg.end,
+            boundary_tolerance=boundary_tolerance,
+        )
         attributed.append((names, seg))
 
     # Merge consecutive segments with the same speaker attribution
