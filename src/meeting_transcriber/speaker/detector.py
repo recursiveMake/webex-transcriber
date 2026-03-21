@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -18,7 +19,7 @@ from typing import Sequence
 import cv2
 import numpy as np
 
-from .layout import TileRegion, find_mic_blobs, _blob_centre, _distance
+from .layout import TileRegion, find_mic_blobs, infer_tile_from_mic, _blob_centre, _distance
 
 log = logging.getLogger(__name__)
 
@@ -42,14 +43,19 @@ def _get_reader():
     return reader
 
 
-# Module-level singleton (lazy)
+# Module-level singleton with lock for thread-safe lazy initialisation.
 _reader = None
+_reader_lock = threading.Lock()
 
 
 def get_reader():
     global _reader
     if _reader is None:
-        _reader = _get_reader()
+        with _reader_lock:
+            # Double-checked locking: re-test inside the lock so two threads
+            # that both see _reader is None don't both initialise it.
+            if _reader is None:
+                _reader = _get_reader()
     return _reader
 
 
@@ -220,7 +226,13 @@ class SpeakerDetector:
                             tile.y <= cy <= tile.y + tile.h):
                         filtered.append(blob)
                         break
-            blobs = filtered if filtered else blobs
+            if filtered:
+                blobs = filtered
+            else:
+                log.debug(
+                    "No blobs found inside known layout tiles — searching full frame instead"
+                )
+                blobs = blobs  # noqa: PLW0127 (explicit no-op for clarity)
 
         # Deduplicate overlapping blobs (keep largest)
         blobs = _deduplicate_blobs(blobs, self._mic_cluster_radius)
@@ -229,8 +241,6 @@ class SpeakerDetector:
         reader = get_reader()
 
         for blob in blobs:
-            # Build a TileRegion centred on this mic blob
-            from .layout import infer_tile_from_mic
             tile = infer_tile_from_mic(blob, h, w)
 
             # Try cache first

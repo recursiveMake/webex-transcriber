@@ -201,6 +201,11 @@ def _run_speaker_detection(
             progress_callback(processed)
 
     prefetch_thread.join(timeout=5)
+    if prefetch_thread.is_alive():
+        log.warning(
+            "Frame-prefetch thread did not exit within 5s — "
+            "possible I/O stall on frame files (thread is daemon, will be cleaned up on exit)"
+        )
 
     log.info(
         "Speaker detection done: %d frames, %d participant(s) identified: %s",

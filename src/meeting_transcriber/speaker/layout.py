@@ -163,27 +163,32 @@ def detect_layout(
 
     frame_h, frame_w = frames[0][1].shape[:2]
 
-    # Accumulate all mic-icon centre positions across frames
-    all_centres: list[tuple[int, int]] = []
+    # Accumulate mic-icon centres AND sizes across all frames.
+    # Storing sizes lets us reconstruct a representative blob with realistic
+    # dimensions rather than a hardcoded 10×10 placeholder.
+    all_blobs: list[tuple[int, int, int, int]] = []  # (cx, cy, bw, bh)
     for _ts, frame in frames:
         for blob in find_mic_blobs(frame):
-            all_centres.append(_blob_centre(blob))
+            bx, by, bw, bh = blob
+            cx, cy = _blob_centre(blob)
+            all_blobs.append((cx, cy, bw, bh))
 
-    if not all_centres:
+    if not all_blobs:
         return None
 
     # Cluster nearby centres (simple greedy clustering)
-    clusters: list[list[tuple[int, int]]] = []
-    for pt in all_centres:
+    clusters: list[list[tuple[int, int, int, int]]] = []
+    for item in all_blobs:
+        cx, cy = item[0], item[1]
         placed = False
         for cluster in clusters:
-            rep = cluster[0]
-            if _distance(pt, rep) <= cluster_radius:
-                cluster.append(pt)
+            rep_cx, rep_cy = cluster[0][0], cluster[0][1]
+            if _distance((cx, cy), (rep_cx, rep_cy)) <= cluster_radius:
+                cluster.append(item)
                 placed = True
                 break
         if not placed:
-            clusters.append([pt])
+            clusters.append([item])
 
     # Keep only clusters that appeared in multiple frames
     stable = [c for c in clusters if len(c) >= min_blob_frames]
@@ -191,15 +196,16 @@ def detect_layout(
         # Relax threshold for very short clips / sparse sampling
         stable = clusters
 
-    # Representative centre per cluster (median)
+    # Representative centre + size per cluster (all medians)
     tiles: list[TileRegion] = []
     for cluster in stable:
-        xs = [p[0] for p in cluster]
-        ys = [p[1] for p in cluster]
-        cx = int(np.median(xs))
-        cy = int(np.median(ys))
-        # Reconstruct a synthetic blob at the representative position
-        blob = (cx - 5, cy - 5, 10, 10)
+        cx = int(np.median([item[0] for item in cluster]))
+        cy = int(np.median([item[1] for item in cluster]))
+        bw = int(np.median([item[2] for item in cluster]))
+        bh = int(np.median([item[3] for item in cluster]))
+        # Use actual observed blob dimensions for accurate tile inference
+        half_w, half_h = max(1, bw // 2), max(1, bh // 2)
+        blob = (cx - half_w, cy - half_h, bw, bh)
         tile = infer_tile_from_mic(blob, frame_h, frame_w)
         tiles.append(tile)
 

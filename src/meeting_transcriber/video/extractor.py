@@ -97,7 +97,9 @@ class VideoExtractor:
             "Extracting frames every %.1fs — expect ~%d frames from %.0fs video",
             self.frame_interval, expected, self.duration,
         )
-        fps_filter = f"1/{self.frame_interval}" if self.frame_interval != 1.0 else "1"
+        # Always use the fraction form — ffmpeg accepts "1/1.0" identical to "1",
+        # and avoids a fragile float exact-equality comparison.
+        fps_filter = f"1/{self.frame_interval}"
         subprocess.run(
             [
                 "ffmpeg", "-y",

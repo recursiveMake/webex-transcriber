@@ -94,7 +94,9 @@ def align(
             and utterances[-1].speakers == names
             and seg.start - utterances[-1].end <= merge_gap
         ):
-            utterances[-1].text += " " + seg.text.strip()
+            stripped = seg.text.strip()
+            if stripped:
+                utterances[-1].text += " " + stripped
             utterances[-1].end = seg.end
             utterances[-1].segments.append(seg)
         else:

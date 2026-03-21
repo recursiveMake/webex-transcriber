@@ -142,7 +142,9 @@ class WhisperTranscriber:
             if seg.text:
                 segments.append(seg)
 
-        duration = segments[-1].end if segments else 0.0
+        # Use max end time rather than last segment end — Whisper segments are
+        # usually ordered, but defensive against any reordering during parsing.
+        duration = max((s.end for s in segments), default=0.0)
         return TranscriptionResult(segments=segments, language=language, duration=duration)
 
     def _parse_words(self, raw_words: list[dict]) -> list[Word]:
