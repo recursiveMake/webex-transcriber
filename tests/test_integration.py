@@ -7,6 +7,7 @@ Run with:  pytest tests/test_integration.py -v -m integration
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -78,9 +79,9 @@ class TestPipelineEndToEnd:
                 "meeting_transcriber.transcription.whisper.WhisperTranscriber.transcribe",
                 return_value=mock_transcription,
             ),
-            patch("ollama.chat", return_value=type(
-                "R", (), {"message": type("M", (), {"content": mock_summary})()}
-            )()),
+            patch("ollama.chat", return_value=SimpleNamespace(
+                message=SimpleNamespace(content=mock_summary)
+            )),
         ):
             config = PipelineConfig(
                 whisper_model="tiny",

@@ -5,7 +5,8 @@ Ollama calls are mocked so tests run without a running Ollama instance.
 
 from __future__ import annotations
 
-from unittest.mock import patch, MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -74,26 +75,38 @@ class TestBuildPrompt:
 # Generator tests (mocked Ollama)
 # ---------------------------------------------------------------------------
 
-_MOCK_RESPONSE = {
-    "message": {
-        "content": (
-            "# Meeting Summary\n\n"
-            "## Key Decisions\n- Bob owns API migration sign-off [Alice, 00:00:08]\n\n"
-            "## Action Items\n- **Carol**: Follow up on testing by Friday [Carol, 00:00:13]\n\n"
-            "## Topics Discussed\n- API migration status\n- Testing timeline\n"
-        )
-    }
-}
+_SUMMARY_CONTENT = (
+    "# Meeting Summary\n\n"
+    "## Key Decisions\n- Bob owns API migration sign-off [Alice, 00:00:08]\n\n"
+    "## Action Items\n- **Carol**: Follow up on testing by Friday [Carol, 00:00:13]\n\n"
+    "## Topics Discussed\n- API migration status\n- Testing timeline\n"
+)
+
+# Plain dict — exercises the response["message"]["content"] fallback path
+_MOCK_RESPONSE_DICT = {"message": {"content": _SUMMARY_CONTENT}}
+
+# Pydantic-style object — exercises the getattr(response, "message") path
+# that the real Ollama SDK (v0.3+) returns.
+_MOCK_RESPONSE_OBJ = SimpleNamespace(message=SimpleNamespace(content=_SUMMARY_CONTENT))
 
 
 class TestSummaryGenerator:
-    def test_generates_markdown(self):
-        with patch("ollama.chat", return_value=_MOCK_RESPONSE):
+    def test_generates_markdown_from_dict_response(self):
+        """Exercises the legacy dict-style response path."""
+        with patch("ollama.chat", return_value=_MOCK_RESPONSE_DICT):
             gen = SummaryGenerator(model="test-model")
             summary = gen.generate(SAMPLE_UTTERANCES)
         assert "# Meeting Summary" in summary
         assert "Key Decisions" in summary
         assert "Action Items" in summary
+
+    def test_generates_markdown_from_object_response(self):
+        """Exercises the Ollama SDK v0.3+ ChatResponse object path."""
+        with patch("ollama.chat", return_value=_MOCK_RESPONSE_OBJ):
+            gen = SummaryGenerator(model="test-model")
+            summary = gen.generate(SAMPLE_UTTERANCES)
+        assert "# Meeting Summary" in summary
+        assert "Key Decisions" in summary
 
     def test_empty_utterances_returns_placeholder(self):
         gen = SummaryGenerator()
@@ -106,8 +119,20 @@ class TestSummaryGenerator:
             with pytest.raises(RuntimeError, match="Ollama request failed"):
                 gen.generate(SAMPLE_UTTERANCES)
 
-    def test_available_models(self):
+    def test_available_models_dict_response(self):
+        """Legacy dict-style ollama.list() response."""
         mock_list = {"models": [{"name": "llama3.2"}, {"name": "gemma3:1b"}]}
+        with patch("ollama.list", return_value=mock_list):
+            gen = SummaryGenerator()
+            models = gen.available_models()
+        assert "llama3.2" in models
+        assert "gemma3:1b" in models
+
+    def test_available_models_object_response(self):
+        """Ollama SDK v0.3+ ListResponse object with .models attribute."""
+        mock_model_1 = SimpleNamespace(model="llama3.2")
+        mock_model_2 = SimpleNamespace(model="gemma3:1b")
+        mock_list = SimpleNamespace(models=[mock_model_1, mock_model_2])
         with patch("ollama.list", return_value=mock_list):
             gen = SummaryGenerator()
             models = gen.available_models()
@@ -122,6 +147,6 @@ class TestSummaryGenerator:
 
 class TestSummariseFunction:
     def test_convenience_function(self):
-        with patch("ollama.chat", return_value=_MOCK_RESPONSE):
+        with patch("ollama.chat", return_value=_MOCK_RESPONSE_OBJ):
             result = summarise(SAMPLE_UTTERANCES, model="test-model")
         assert "Meeting Summary" in result
