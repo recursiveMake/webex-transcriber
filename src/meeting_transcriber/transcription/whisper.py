@@ -1,0 +1,159 @@
+"""Whisper-based transcription using mlx-whisper (Apple Silicon native).
+
+mlx-whisper leverages Apple's MLX framework for Metal-accelerated inference
+on Apple Silicon — significantly faster than CPU-bound alternatives.
+
+Produces word-level timestamps for precise speaker alignment.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+
+# ---------------------------------------------------------------------------
+# Data types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Word:
+    """A single transcribed word with timing."""
+    text: str
+    start: float   # seconds
+    end: float     # seconds
+    confidence: float = 1.0
+
+    def __repr__(self) -> str:
+        return f"Word({self.text!r}, {self.start:.2f}–{self.end:.2f})"
+
+
+@dataclass
+class Segment:
+    """A contiguous speech segment (sentence or clause)."""
+    text: str
+    start: float
+    end: float
+    words: list[Word] = field(default_factory=list)
+    language: str = "en"
+
+    def __repr__(self) -> str:
+        return f"Segment({self.start:.1f}–{self.end:.1f}: {self.text[:40]!r})"
+
+
+@dataclass
+class TranscriptionResult:
+    """Full transcription output."""
+    segments: list[Segment]
+    language: str
+    duration: float
+
+    @property
+    def words(self) -> list[Word]:
+        return [w for seg in self.segments for w in seg.words]
+
+    @property
+    def full_text(self) -> str:
+        return " ".join(seg.text.strip() for seg in self.segments)
+
+
+# ---------------------------------------------------------------------------
+# Available model sizes (ordered by size)
+# ---------------------------------------------------------------------------
+
+MODELS = ["tiny", "base", "small", "medium", "large", "large-v2", "large-v3"]
+DEFAULT_MODEL = "large-v3"
+
+
+# ---------------------------------------------------------------------------
+# Transcriber
+# ---------------------------------------------------------------------------
+
+class WhisperTranscriber:
+    """Wraps mlx-whisper for Apple Silicon optimised transcription.
+
+    Args:
+        model: Whisper model name (e.g. ``"large-v3"``, ``"medium"``).
+        language: Force language (``"en"`` for English). None = auto-detect.
+        beam_size: Beam search width (higher = more accurate, slower).
+    """
+
+    def __init__(
+        self,
+        model: str = DEFAULT_MODEL,
+        language: str | None = "en",
+        beam_size: int = 5,
+    ) -> None:
+        self.model = model
+        self.language = language
+        self.beam_size = beam_size
+
+    def transcribe(self, audio_path: Path) -> TranscriptionResult:
+        """Transcribe a WAV file and return word-level timestamped results."""
+        import mlx_whisper
+
+        audio_path = Path(audio_path)
+        if not audio_path.exists():
+            raise FileNotFoundError(f"Audio file not found: {audio_path}")
+
+        result = mlx_whisper.transcribe(
+            str(audio_path),
+            path_or_hf_repo=f"mlx-community/whisper-{self.model}-mlx",
+            word_timestamps=True,
+            language=self.language,
+            beam_size=self.beam_size,
+        )
+
+        return self._parse_result(result)
+
+    # ------------------------------------------------------------------
+    # Internal parsing
+    # ------------------------------------------------------------------
+
+    def _parse_result(self, raw: dict) -> TranscriptionResult:
+        segments: list[Segment] = []
+        language = raw.get("language", "en")
+
+        for seg_raw in raw.get("segments", []):
+            words = self._parse_words(seg_raw.get("words", []))
+            seg = Segment(
+                text=seg_raw.get("text", "").strip(),
+                start=float(seg_raw.get("start", 0.0)),
+                end=float(seg_raw.get("end", 0.0)),
+                words=words,
+                language=language,
+            )
+            if seg.text:
+                segments.append(seg)
+
+        duration = segments[-1].end if segments else 0.0
+        return TranscriptionResult(segments=segments, language=language, duration=duration)
+
+    def _parse_words(self, raw_words: list[dict]) -> list[Word]:
+        words: list[Word] = []
+        for w in raw_words:
+            text = w.get("word", "").strip()
+            if not text:
+                continue
+            words.append(Word(
+                text=text,
+                start=float(w.get("start", 0.0)),
+                end=float(w.get("end", 0.0)),
+                confidence=float(w.get("probability", 1.0)),
+            ))
+        return words
+
+
+# ---------------------------------------------------------------------------
+# Convenience function
+# ---------------------------------------------------------------------------
+
+def transcribe(
+    audio_path: Path,
+    model: str = DEFAULT_MODEL,
+    language: str | None = "en",
+    beam_size: int = 5,
+) -> TranscriptionResult:
+    """Transcribe audio and return word-level timestamped results."""
+    return WhisperTranscriber(model=model, language=language, beam_size=beam_size).transcribe(audio_path)
