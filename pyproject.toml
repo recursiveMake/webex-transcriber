@@ -36,3 +36,6 @@ packages = ["src/meeting_transcriber"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v"
+markers = [
+    "integration: marks tests as integration tests (slow, require models/ffmpeg)",
+]
