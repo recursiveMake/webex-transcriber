@@ -119,13 +119,21 @@ class SummaryGenerator:
                 f"  ollama pull {self.model}\nError: {exc}"
             ) from exc
 
+        # SDK may return a ChatResponse object or a dict depending on version
+        msg = getattr(response, "message", None)
+        if msg is not None:
+            return getattr(msg, "content", str(msg))
         return response["message"]["content"]
 
     def available_models(self) -> list[str]:
         """Return a list of locally available Ollama model names."""
         import ollama
         try:
-            return [m["name"] for m in ollama.list()["models"]]
+            response = ollama.list()
+            # SDK returns a ListResponse with .models (list of Model objects)
+            # Older versions returned a dict with "models" key
+            models = getattr(response, "models", None) or response.get("models", [])
+            return [getattr(m, "model", None) or m.get("name", "") for m in models]
         except Exception:
             return []
 
