@@ -8,6 +8,7 @@ Design decisions:
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -18,6 +19,8 @@ import cv2
 import numpy as np
 
 from .layout import TileRegion, find_mic_blobs, _blob_centre, _distance
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -32,7 +35,11 @@ def _get_reader():
         gpu = torch.backends.mps.is_available()
     except Exception:
         gpu = False
-    return easyocr.Reader(["en"], gpu=gpu, verbose=False)
+    device = "MPS" if gpu else "CPU"
+    log.info("Initialising EasyOCR (device=%s) — this may take a moment…", device)
+    reader = easyocr.Reader(["en"], gpu=gpu, verbose=False)
+    log.info("EasyOCR ready")
+    return reader
 
 
 # Module-level singleton (lazy)
@@ -230,12 +237,17 @@ class SpeakerDetector:
             cached = self._cache.get(tile)
             if cached and cached[1] >= self._cache_min_confidence:
                 name, conf = cached
+                log.debug("Cache hit for tile (%d,%d): %r (conf=%.2f)", tile.mic_x, tile.mic_y, name, conf)
             else:
                 name, conf = ocr_tile_name(frame, tile, reader)
                 if name:
+                    log.info("OCR identified new participant: %r (conf=%.2f)", name, conf)
                     self._cache.put(tile, name, conf)
                 elif cached:
                     name, conf = cached  # fall back to lower-confidence cached value
+                    log.debug("OCR failed; using cached name %r for tile (%d,%d)", name, tile.mic_x, tile.mic_y)
+                else:
+                    log.warning("Could not identify speaker at tile (%d,%d) — no OCR result and no cache", tile.mic_x, tile.mic_y)
 
             if name:
                 speakers.append(ActiveSpeaker(name=name, tile=tile, confidence=conf))

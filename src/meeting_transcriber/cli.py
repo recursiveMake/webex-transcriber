@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import click
@@ -9,6 +10,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from meeting_transcriber.logging_config import setup as setup_logging
 from meeting_transcriber.pipeline import PipelineConfig, run
 from meeting_transcriber.transcription.whisper import MODELS, DEFAULT_MODEL
 
@@ -56,6 +58,18 @@ err_console = Console(stderr=True)
     default=False,
     help="List locally available Ollama models and exit.",
 )
+@click.option(
+    "--verbose", "-v",
+    is_flag=True,
+    default=False,
+    help="Enable DEBUG logging (very detailed output).",
+)
+@click.option(
+    "--quiet", "-q",
+    is_flag=True,
+    default=False,
+    help="Suppress INFO logs; show only warnings and errors.",
+)
 def main(
     video: Path,
     output_dir: Path | None,
@@ -64,6 +78,8 @@ def main(
     frame_interval: float,
     keep_work_dir: bool,
     list_ollama_models: bool,
+    verbose: bool,
+    quiet: bool,
 ) -> None:
     """Transcribe and summarise a WebEx meeting video.
 
@@ -73,6 +89,9 @@ def main(
       - <stem>_transcript.md  — timestamped, speaker-attributed transcript
       - <stem>_summary.md     — structured meeting summary with citations
     """
+    level = logging.DEBUG if verbose else logging.INFO
+    setup_logging(level=level, quiet=quiet)
+
     if list_ollama_models:
         from meeting_transcriber.summary.generator import SummaryGenerator
         models = SummaryGenerator().available_models()

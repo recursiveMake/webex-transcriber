@@ -13,6 +13,7 @@ style via threads since mlx-whisper/EasyOCR both hold the GIL minimally).
 
 from __future__ import annotations
 
+import logging
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -40,7 +41,7 @@ from meeting_transcriber.summary.generator import SummaryGenerator
 from meeting_transcriber.transcription.whisper import TranscriptionResult, WhisperTranscriber
 from meeting_transcriber.video.extractor import VideoExtractor
 
-
+log = logging.getLogger(__name__)
 console = Console(stderr=True)
 
 
@@ -112,6 +113,7 @@ def _run_speaker_detection(
     progress_callback: Callable[[int], None] | None = None,
 ) -> list[tuple[float, list]]:
     """Process all sampled frames and return per-frame speaker detections."""
+    log.info("Speaker detection starting: %d frames to process", len(frames))
     tracker = LayoutTracker(
         window=config.layout_window,
         drift_threshold=config.layout_drift_threshold,
@@ -123,6 +125,7 @@ def _run_speaker_detection(
     for i, (ts, frame_path) in enumerate(frames):
         frame = cv2.imread(str(frame_path))
         if frame is None:
+            log.warning("Could not read frame at t=%.1fs: %s", ts, frame_path.name)
             continue
 
         layout = tracker.update(ts, frame)
@@ -130,9 +133,19 @@ def _run_speaker_detection(
         active = detector.process_frame(frame, layout_tiles=layout_tiles)
         results.append((ts, active))
 
+        if active:
+            names = [s.name for s in active]
+            log.debug("t=%.1fs: active speakers = %s", ts, names)
+
         if progress_callback:
             progress_callback(i + 1)
 
+    log.info(
+        "Speaker detection done: %d frames processed, %d known participant(s): %s",
+        len(results),
+        len(detector.known_participants),
+        detector.known_participants or ["none detected"],
+    )
     return results
 
 
@@ -160,7 +173,11 @@ def run(
     stem = video_path.stem
 
     work_dir = Path(tempfile.mkdtemp(prefix="meeting_work_"))
-    console.log(f"[dim]Work directory: {work_dir}[/dim]")
+    log.info("Work directory: %s", work_dir)
+    log.info(
+        "Pipeline config: whisper=%s, ollama=%s, frame_interval=%.1fs",
+        config.whisper_model, config.ollama_model, config.frame_interval,
+    )
 
     try:
         _run_pipeline(video_path, stem, work_dir, config)

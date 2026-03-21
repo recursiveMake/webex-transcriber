@@ -15,6 +15,7 @@ layout detection when accumulated evidence drifts significantly.
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,6 +23,8 @@ from typing import Sequence
 
 import cv2
 import numpy as np
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -248,11 +251,21 @@ class LayoutTracker:
 
     def _has_drifted(self, new: LayoutSnapshot) -> bool:
         if len(new.tiles) != len(self._current.tiles):  # type: ignore[union-attr]
+            old_n = len(self._current.tiles)  # type: ignore[union-attr]
+            log.info(
+                "Layout drift at %.1fs: tile count changed %d → %d",
+                new.timestamp, old_n, len(new.tiles),
+            )
             return True
         for old_tile, new_tile in zip(
             sorted(self._current.tiles, key=lambda t: (t.y, t.x)),  # type: ignore[union-attr]
             sorted(new.tiles, key=lambda t: (t.y, t.x)),
         ):
-            if _distance(old_tile.centre, new_tile.centre) > self._drift_threshold:
+            dist = _distance(old_tile.centre, new_tile.centre)
+            if dist > self._drift_threshold:
+                log.info(
+                    "Layout drift at %.1fs: tile moved %.0fpx (threshold=%dpx)",
+                    new.timestamp, dist, self._drift_threshold,
+                )
                 return True
         return False

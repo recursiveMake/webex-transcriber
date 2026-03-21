@@ -6,11 +6,14 @@ Whisper segments attributed to the same speaker(s).
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Sequence
 
 from meeting_transcriber.transcription.whisper import Segment, TranscriptionResult
 from meeting_transcriber.speaker.timeline import SpeakerSpan, speakers_for_segment
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -66,7 +69,13 @@ def align(
         Sorted list of Utterance objects.
     """
     if not transcription.segments:
+        log.warning("No transcription segments to align")
         return []
+
+    log.info(
+        "Aligning %d segments against %d timeline spans (boundary_tolerance=%.2fs)",
+        len(transcription.segments), len(timeline), boundary_tolerance,
+    )
 
     # Assign speaker(s) to each segment
     attributed: list[tuple[list[str], Segment]] = []
@@ -97,6 +106,13 @@ def align(
                 segments=[seg],
             ))
 
+    unknown_count = sum(1 for u in utterances if u.speakers == ["Unknown"])
+    if unknown_count:
+        log.warning(
+            "%d/%d utterances attributed to Unknown (no matching speaker span)",
+            unknown_count, len(utterances),
+        )
+    log.info("Alignment complete: %d utterances", len(utterances))
     return utterances
 
 

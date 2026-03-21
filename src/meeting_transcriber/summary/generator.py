@@ -9,10 +9,13 @@ The summary includes:
 
 from __future__ import annotations
 
+import logging
 import textwrap
 from typing import Sequence
 
 from meeting_transcriber.alignment.aligner import Utterance, _fmt_time
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -96,8 +99,13 @@ class SummaryGenerator:
         import ollama
 
         if not utterances:
+            log.warning("No utterances provided; returning placeholder summary")
             return "# Meeting Summary\n\n*No transcript content available.*\n"
 
+        log.info(
+            "Generating summary via Ollama model=%r (%d utterances)",
+            self.model, len(utterances),
+        )
         prompt = _build_prompt(utterances)
 
         try:
@@ -122,8 +130,11 @@ class SummaryGenerator:
         # SDK may return a ChatResponse object or a dict depending on version
         msg = getattr(response, "message", None)
         if msg is not None:
-            return getattr(msg, "content", str(msg))
-        return response["message"]["content"]
+            content = getattr(msg, "content", str(msg))
+        else:
+            content = response["message"]["content"]
+        log.info("Summary generated (%d chars)", len(content))
+        return content
 
     def available_models(self) -> list[str]:
         """Return a list of locally available Ollama model names."""

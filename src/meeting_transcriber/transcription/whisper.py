@@ -8,9 +8,12 @@ Produces word-level timestamps for precise speaker alignment.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -97,15 +100,27 @@ class WhisperTranscriber:
         if not audio_path.exists():
             raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
+        repo = f"mlx-community/whisper-{self.model}-mlx"
+        log.info(
+            "Starting Whisper transcription: model=%s, beam_size=%d, language=%s",
+            self.model, self.beam_size, self.language or "auto",
+        )
+        log.info("Model repo: %s (will download on first use)", repo)
+
         result = mlx_whisper.transcribe(
             str(audio_path),
-            path_or_hf_repo=f"mlx-community/whisper-{self.model}-mlx",
+            path_or_hf_repo=repo,
             word_timestamps=True,
             language=self.language,
             beam_size=self.beam_size,
         )
 
-        return self._parse_result(result)
+        parsed = self._parse_result(result)
+        log.info(
+            "Transcription complete: %d segments, %.1fs audio, language=%s",
+            len(parsed.segments), parsed.duration, parsed.language,
+        )
+        return parsed
 
     # ------------------------------------------------------------------
     # Internal parsing

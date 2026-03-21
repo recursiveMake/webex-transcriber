@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 
 class VideoExtractor:
@@ -65,6 +68,7 @@ class VideoExtractor:
         """Extract mono 16 kHz WAV suitable for Whisper."""
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        log.info("Extracting audio → %s (16 kHz mono WAV)", output_path.name)
         subprocess.run(
             [
                 "ffmpeg", "-y",
@@ -78,6 +82,7 @@ class VideoExtractor:
             capture_output=True,
             check=True,
         )
+        log.info("Audio extracted: %.1f s", self.duration)
         return output_path
 
     def extract_frames(self, output_dir: Path) -> list[tuple[float, Path]]:
@@ -87,6 +92,11 @@ class VideoExtractor:
         """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
+        expected = int(self.duration / self.frame_interval)
+        log.info(
+            "Extracting frames every %.1fs — expect ~%d frames from %.0fs video",
+            self.frame_interval, expected, self.duration,
+        )
         fps_filter = f"1/{self.frame_interval}" if self.frame_interval != 1.0 else "1"
         subprocess.run(
             [
@@ -100,6 +110,7 @@ class VideoExtractor:
             check=True,
         )
         frames = sorted(output_dir.glob("frame_*.jpg"))
+        log.info("Extracted %d frames", len(frames))
         return [(i * self.frame_interval, f) for i, f in enumerate(frames)]
 
     def extract_all(
