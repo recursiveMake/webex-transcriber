@@ -279,20 +279,35 @@ class SpeakerDetector:
             # Primary path: check all three cues on known tile positions.
             active_tiles = find_active_tiles(frame, layout_tiles)
 
-            # Secondary path: also scan the full frame for blobs outside all
-            # known tiles.  This catches speakers who haven't been seen before
-            # and whose tile hasn't been added to the accumulated layout yet.
+            # Secondary path: also scan the full frame for blobs to catch
+            # speakers whose tile may not have fired via the multi-cue check,
+            # or who are genuinely new and not yet in the layout.
+            #
+            # Use mic-position proximity rather than tile-boundary containment.
+            # Tile boundaries are heuristic and the blob centroid can sit just
+            # outside them even for a known participant — causing a fresh tile
+            # to be inferred each frame with a slightly different mic_x/mic_y,
+            # producing a different cache key and triggering OCR every frame.
+            # Matching by proximity to the stored mic_x/mic_y gives a stable
+            # reference and therefore a stable cache key.
             blobs = find_mic_blobs(frame)
             blobs = _deduplicate_blobs(blobs, self._mic_cluster_radius)
             for blob in blobs:
                 cx, cy = _blob_centre(blob)
-                in_known = any(
-                    t.x <= cx <= t.x + t.w and t.y <= cy <= t.y + t.h
-                    for t in layout_tiles
+                closest = min(
+                    layout_tiles,
+                    key=lambda t: _distance((cx, cy), (t.mic_x, t.mic_y)),
+                    default=None,
                 )
-                if not in_known:
+                if closest is not None and _distance(
+                    (cx, cy), (closest.mic_x, closest.mic_y)
+                ) <= self._mic_cluster_radius:
+                    # Near a known tile — use the stored tile (stable cache key).
+                    if closest not in active_tiles:
+                        active_tiles.append(closest)
+                else:
                     log.debug(
-                        "Blob at (%d,%d) outside known layout — new participant candidate",
+                        "Blob at (%d,%d) not near any known tile — new participant candidate",
                         cx, cy,
                     )
                     active_tiles.append(infer_tile_from_mic(blob, h, w))
