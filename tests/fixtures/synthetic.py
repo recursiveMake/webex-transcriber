@@ -52,11 +52,15 @@ def make_participant_tile(
     ty = name_y + (name_h + text_size[1]) // 2
     cv2.putText(frame, name, (tx, ty), font, font_scale, (220, 220, 220), 1, cv2.LINE_AA)
 
-    # Mic icon: small filled circle at bottom-right of the tile
+    # Active-speaker cues: green border around the tile + mic icon blob.
+    # The border is the primary signal used by find_bordered_tiles.
+    # The mic blob is positioned well inside the tile so it stays as a
+    # separate contour from the border after morphological operations.
     if active:
-        mic_x = x + w - 14
-        mic_y = y + h - 10
-        cv2.circle(frame, (mic_x, mic_y), 7, _MIC_GREEN, -1)
+        cv2.rectangle(frame, (x, y), (x + w, y + h), _MIC_GREEN, 2)
+        mic_x = x + w - 18
+        mic_y = y + h - 22
+        cv2.circle(frame, (mic_x, mic_y), 6, _MIC_GREEN, -1)
 
 
 def make_webex_frame(
@@ -109,13 +113,13 @@ def two_participant_frame(
             "name": "Alice",
             "tile": (_RIGHT_X, 10, _TILE_W, _TILE_H),
             "active": active == "Alice",
-            "avatar_colour": (100, 60, 60),
+            "avatar_colour": (120, 60, 60),   # blue-ish, H≈120 — outside green range
         },
         {
             "name": "Bob",
             "tile": (_RIGHT_X, 10 + _TILE_H + 8, _TILE_W, _TILE_H),
             "active": active == "Bob",
-            "avatar_colour": (60, 100, 60),
+            "avatar_colour": (60, 60, 120),   # red-ish, H≈0 — outside green range
         },
     ]
     return make_webex_frame(participants, frame_w, frame_h)

@@ -58,18 +58,18 @@ class TestInferTile:
 class TestDetectLayout:
     def test_detects_one_active_speaker(self):
         frame = two_participant_frame(active="Alice")
-        snap = detect_layout([(0.0, frame)], min_blob_frames=1)
+        snap = detect_layout([(0.0, frame)], min_tile_frames=1)
         assert snap is not None
         assert len(snap.tiles) >= 1
 
     def test_no_layout_when_no_green(self):
         frame = no_active_speaker_frame()
-        snap = detect_layout([(0.0, frame)], min_blob_frames=1)
+        snap = detect_layout([(0.0, frame)], min_tile_frames=1)
         assert snap is None or len(snap.tiles) == 0
 
     def test_multi_frame_stability(self):
         frames = [(float(i), two_participant_frame(active="Alice")) for i in range(5)]
-        snap = detect_layout(frames, min_blob_frames=3)
+        snap = detect_layout(frames, min_tile_frames=3)
         assert snap is not None
         assert len(snap.tiles) == 1
 
