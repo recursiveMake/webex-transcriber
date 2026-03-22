@@ -73,7 +73,7 @@ meeting-transcriber [OPTIONS] VIDEO
 | `-o, --output-dir PATH` | Same dir as video | Where to write the two output files |
 | `-m, --whisper-model` | `large-v3` | Whisper model size (see table below) |
 | `--ollama-model TEXT` | `gemma3:1b` | Ollama model for the summary |
-| `--frame-interval FLOAT` | `1.0` | Seconds between sampled frames for speaker detection |
+| `--frame-interval FLOAT` | `0.5` | Seconds between sampled frames for speaker detection |
 | `--keep-work-dir` | off | Retain the temporary work directory (audio WAV, extracted frames) after processing |
 | `-v, --verbose` | off | Enable DEBUG logging (per-frame speaker activity, OCR cache hits) |
 | `-q, --quiet` | off | Suppress INFO logs; show warnings and errors only |
@@ -191,7 +191,7 @@ That's great news. Let's make that official.
 
 Audio diarisation models (pyannote, NeMo, etc.) work by finding acoustic differences between speakers. They degrade quickly when voices are similar, when participants are on different microphones, or when the audio is compressed (as WebEx recordings are). Their error rates are hard to predict and difficult to correct.
 
-WebEx already solves this problem at the source: it knows who is speaking and displays a green microphone icon next to that participant's thumbnail. Parsing this visual signal gives ground-truth speaker identity with no acoustic modelling required.
+WebEx already solves this problem at the source: it knows who is speaking and highlights the active speaker's tile with several visual cues — a green microphone icon, a green border around the participant's thumbnail, and (in some WebEx versions) a green highlight on the name label. Parsing these visual signals gives ground-truth speaker identity with no acoustic modelling required.
 
 The trade-off is that the approach is specific to WebEx's UI. The colour thresholds and tile inference logic would need adjustment for other platforms (Zoom, Teams, Meet), though the architecture is the same.
 
@@ -212,15 +212,16 @@ Whisper and the visual speaker timeline are produced by independent processes wi
 
 - **Whisper** timestamps come from audio analysis and are accurate to ~100 ms.
 - **Frame sampling** at 1 fps means each speaker detection has up to ±1 s of quantisation error.
-- **WebEx display lag**: the green mic icon appears roughly 200–400 ms after a speaker starts and clears 100–300 ms after they stop.
+- **WebEx display lag**: WebEx visual cues (green mic icon, tile border highlight, name label highlight) can appear up to ~1 s after a speaker starts talking and can drop intermittently during continuous speech.
+- **Intermittent cue drop-outs**: codec artefacts and brief mic-state resets can make the green indicator disappear for one or more frames mid-utterance.
 
 Three mechanisms compensate:
 
-1. **Temporal smoothing** — a 3-frame majority-vote window removes single-frame mic-icon flickers (e.g. from codec artefacts) before span construction. A speaker must dominate more than half of the surrounding frames to register as a change.
+1. **Temporal smoothing** — a 3-frame majority-vote window removes single-frame cue flickers before span construction. A speaker must dominate more than half of the surrounding frames to register as a change.
 
-2. **Span padding** — every detected speaker span is expanded by 300 ms at its start and 200 ms at its end to absorb the visual lag. Adjacent expanded spans are then re-clamped to prevent overlaps.
+2. **Span padding** — every detected speaker span is expanded by 1.0 s at its start and 0.5 s at its end to absorb the visual lag and intermittent drop-outs. Adjacent expanded spans are then re-clamped to prevent overlaps. A 3.0 s merge gap bridges consecutive same-speaker spans separated by brief cue absences.
 
-3. **Boundary tolerance** — when assigning a Whisper segment to a speaker, the lookup window is widened by 400 ms at each boundary. Matches inside the tolerance zone are discounted to 25% weight so they only influence the result if no stronger candidate exists.
+3. **Boundary tolerance** — when assigning a Whisper segment to a speaker, the lookup window is widened by 1.5 s at each boundary. Matches inside the tolerance zone are discounted to 25% weight so they only influence the result if no stronger candidate exists.
 
 ### Parallelism
 
@@ -234,7 +235,7 @@ Audio and frame extraction run in two threads simultaneously (both are ffmpeg su
 
 Within speaker detection, a background thread pre-loads JPEG frames from disk into a bounded queue (depth 8) while the main thread processes them, hiding disk I/O latency behind computation.
 
-EasyOCR is expensive (~500 ms per call) but is only ever called once per unique tile position across the entire video — subsequent frames are O(1) cache lookups. For a 1-hour meeting with 10 participants, that is at most 10 OCR calls regardless of meeting length.
+EasyOCR is expensive (~500 ms per call) but is only ever called once per unique tile position, and only within the 5%–95% window of the video — avoiding the dynamic join/leave period at the start and end. Subsequent frames are O(1) cache lookups. For a 1-hour meeting with 10 participants, that is at most 10 OCR calls regardless of meeting length.
 
 ---
 
@@ -248,7 +249,7 @@ All figures measured on an Apple Silicon M-series MacBook Pro. Times are approxi
 |---|---|---|
 | Audio + frame extraction | ~30 s | Both run in parallel; dominated by frame extraction |
 | Whisper transcription (`large-v3`) | ~50–70 min | Runs concurrently with speaker detection |
-| Speaker detection (3,600 frames) | ~2–5 min | Frame read: ~3 s; blob detection: ~4 s; OCR: ≤10 calls |
+| Speaker detection (7,200 frames at 0.5 s interval) | ~4–10 min | Frame read: ~6 s; blob detection: ~8 s; OCR: ≤10 calls |
 | Timeline + alignment | < 5 s | CPU-bound, fast |
 | Ollama summary (`gemma3:1b`) | ~30–90 s | Depends on transcript length and model |
 | File write | < 1 s | |
@@ -259,12 +260,12 @@ All figures measured on an Apple Silicon M-series MacBook Pro. Times are approxi
 
 | Scenario | Whisper model | Frame interval | Estimated total time (60-min meeting) |
 |---|---|---|---|
-| Maximum quality | `large-v3` | 1.0 s | ~60–75 min |
-| Recommended | `medium` | 1.0 s | ~25–35 min |
+| Maximum quality | `large-v3` | 0.5 s | ~60–75 min |
+| Recommended | `medium` | 0.5 s | ~25–35 min |
 | Fast draft | `small` | 2.0 s | ~12–18 min |
 | Quick check | `tiny` | 2.0 s | ~5–8 min |
 
-Frame interval has a small effect on total time (affects speaker detection only, not Whisper). Whisper model size is the dominant variable.
+Frame interval primarily affects speaker detection time (not Whisper). At 0.5 s the detection stage roughly doubles vs. 1.0 s, but Whisper remains the dominant variable for total runtime.
 
 ### Memory
 

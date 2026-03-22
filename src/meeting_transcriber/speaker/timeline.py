@@ -5,20 +5,21 @@ Consecutive frames with the same speaker(s) are merged into spans.
 
 Timestamp resilience
 --------------------
-WebEx has a known visual lag: the green mic indicator appears ~200-400ms
-after a speaker starts and clears ~100-300ms after they stop.  Frame
-sampling at 1 fps adds additional quantisation error (up to ±frame_interval).
+WebEx visual cues (green mic icon, tile border highlight, name highlight)
+lag actual speech onset by up to ~1 s and can drop intermittently during
+continuous speech (codec artefacts, brief mic-state resets).  Frame
+sampling at 0.5 s adds additional quantisation error (up to ±frame_interval).
 We compensate with three mechanisms:
 
 1. **Temporal smoothing**: a sliding majority-vote window eliminates
    single-frame flickers before span construction.
-2. **Span padding**: each merged span is expanded by ``onset_pad`` seconds
-   at its start and ``offset_pad`` seconds at its end, then adjacent
-   expanded spans are re-clamped so they do not overlap.
+2. **Span padding**: each merged span is expanded by ``onset_pad`` (default
+   1.0 s) at its start and ``offset_pad`` (default 0.5 s) at its end, then
+   adjacent expanded spans are re-clamped so they do not overlap.
 3. **Segment search tolerance**: ``speakers_for_segment`` accepts a
-   ``boundary_tolerance`` argument that widens the lookup window at both
-   ends of a transcript segment, so a segment that begins just *after* a
-   speaker's span start is still attributed correctly.
+   ``boundary_tolerance`` argument (default 1.5 s) that widens the lookup
+   window at both ends of a transcript segment, so a segment that begins
+   just *after* a speaker's span start is still attributed correctly.
 """
 
 from __future__ import annotations
@@ -107,24 +108,29 @@ def _smooth_speakers(
 def build_timeline(
     frame_results: Sequence[tuple[float, list[ActiveSpeaker]]],
     *,
-    frame_interval: float = 1.0,
+    frame_interval: float = 0.5,
     min_span_duration: float = 0.5,
-    merge_gap: float = 2.0,
-    onset_pad: float = 0.3,
-    offset_pad: float = 0.2,
+    merge_gap: float = 3.0,
+    onset_pad: float = 1.0,
+    offset_pad: float = 0.5,
     smoothing_window: int = 3,
 ) -> list[SpeakerSpan]:
     """Convert per-frame speaker detections into a merged timeline.
+
+    Default parameter values mirror ``PipelineConfig``; the pipeline always
+    passes these explicitly, so the defaults here exist only for direct
+    callers (e.g. tests) that omit individual arguments.
 
     Args:
         frame_results: Sequence of (timestamp, [ActiveSpeaker]) pairs.
         frame_interval: Nominal seconds between sampled frames.
         min_span_duration: Discard spans shorter than this (noise).
         merge_gap: Merge consecutive same-speaker spans if gap ≤ this (seconds).
-        onset_pad: Expand each span's *start* backwards by this many seconds
-            to compensate for WebEx green-mic onset delay.
-        offset_pad: Expand each span's *end* forwards by this many seconds
-            to compensate for WebEx green-mic clearance delay.
+            3 s bridges intermittent cue drop-outs during continuous speech.
+        onset_pad: Expand each span's *start* backwards by this many seconds.
+            WebEx cues can lag speech onset by up to ~1 s.
+        offset_pad: Expand each span's *end* forwards by this many seconds.
+            Cues can clear before speech actually ends.
         smoothing_window: Odd number of frames for majority-vote smoothing
             (1 = disabled).
 
@@ -209,7 +215,7 @@ def speakers_for_segment(
     start: float,
     end: float,
     *,
-    boundary_tolerance: float = 0.4,
+    boundary_tolerance: float = 1.5,
 ) -> list[str]:
     """Return the speaker(s) most active during a transcript segment [start, end).
 

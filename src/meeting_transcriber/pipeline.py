@@ -83,8 +83,10 @@ class PipelineConfig:
     whisper_model: str = "large-v3"
     whisper_temperature: float = 0.0
 
-    # Frame sampling
-    frame_interval: float = 1.0       # seconds between sampled frames
+    # Frame sampling — 0.5 s gives better temporal resolution for the
+    # intermittent WebEx green cue without significantly increasing total cost
+    # (speaker detection is fast compared to Whisper transcription).
+    frame_interval: float = 0.5
 
     # Speaker detection
     layout_window: int = 10           # frames for layout accumulation
@@ -92,16 +94,17 @@ class PipelineConfig:
     mic_cluster_radius: int = 40      # px radius for blob deduplication
 
     # Timeline
-    timeline_merge_gap: float = 2.0   # seconds; merge same-speaker gaps
+    # WebEx visual cues (green mic, tile border, name highlight) can lag actual
+    # speech onset by up to ~1 s and drop intermittently during speech.
+    # Use a generous merge gap and padding to bridge those gaps.
+    timeline_merge_gap: float = 3.0   # seconds; merge same-speaker gaps
     min_span_duration: float = 0.5    # drop spans shorter than this
-    # WebEx visual-lag compensation: mic appears ~300ms after speech starts,
-    # clears ~200ms after speech ends.  Both values expand detected spans.
-    timeline_onset_pad: float = 0.3
-    timeline_offset_pad: float = 0.2
+    timeline_onset_pad: float = 1.0   # expand span starts back by ~1 s
+    timeline_offset_pad: float = 0.5  # expand span ends forward by ~0.5 s
     # Temporal smoothing: majority-vote window over N consecutive frames
     timeline_smoothing_window: int = 3
     # Alignment boundary tolerance: widens per-segment speaker lookup (seconds)
-    alignment_boundary_tolerance: float = 0.4
+    alignment_boundary_tolerance: float = 1.5
 
     # Alignment
     alignment_merge_gap: float = 1.5  # seconds; merge same-speaker segments
@@ -173,6 +176,24 @@ def _run_speaker_detection(
     )
     detector = SpeakerDetector(mic_cluster_radius=config.mic_cluster_radius)
 
+    # OCR window: restrict new participant-name OCR to 5%–95% of the video to
+    # avoid the dynamic situations at meeting start (join animations, layout
+    # changes) and end (leave notifications).  Cached names are still used
+    # outside this window; only new OCR calls are suppressed.
+    if len(frames) >= 2:
+        first_ts, last_ts = frames[0][0], frames[-1][0]
+        span = last_ts - first_ts
+        ocr_start = first_ts + span * 0.05
+        ocr_end   = first_ts + span * 0.95
+    else:
+        # Too few frames to apply the window; allow OCR everywhere.
+        ocr_start, ocr_end = 0.0, float("inf")
+
+    log.info(
+        "OCR window: %.1fs – %.1fs (5%%–95%% of video)",
+        ocr_start, ocr_end,
+    )
+
     # Start prefetch thread
     queue: Queue = Queue(maxsize=_PREFETCH_DEPTH)
     prefetch_thread = Thread(
@@ -191,7 +212,8 @@ def _run_speaker_detection(
         ts, frame = item
         layout = tracker.update(ts, frame)
         layout_tiles = layout.tiles if layout else None
-        active = detector.process_frame(frame, layout_tiles=layout_tiles)
+        allow_ocr = ocr_start <= ts <= ocr_end
+        active = detector.process_frame(frame, layout_tiles=layout_tiles, allow_new_ocr=allow_ocr)
         results.append((ts, active))
         processed += 1
 

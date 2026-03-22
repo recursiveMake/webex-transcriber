@@ -80,6 +80,87 @@ class LayoutSnapshot:
 # Core detection helpers
 # ---------------------------------------------------------------------------
 
+def find_active_tiles(
+    frame: np.ndarray,
+    tiles: list[TileRegion],
+) -> list[TileRegion]:
+    """Return tiles where any WebEx active-speaker cue is detected.
+
+    Checks three cues in order; any one is sufficient to flag a tile active:
+
+    1. **Green mic-icon blob** within the tile (small, distinctive).
+    2. **Green border/highlight** around the tile perimeter (thin outline
+       drawn by WebEx around the active speaker's thumbnail).
+    3. **Green name-strip highlight** at the bottom of the tile (the name
+       label background turns green on the active speaker's tile in some
+       WebEx versions).
+
+    Computing the HSV green mask once and sharing it across all tiles keeps
+    this O(frame_pixels + N_tiles) rather than O(N_tiles × frame_pixels).
+    """
+    if not tiles:
+        return []
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    green_mask = cv2.inRange(hsv, _GREEN_LOWER, _GREEN_UPPER)
+    fh, fw = frame.shape[:2]
+    return [t for t in tiles if _tile_has_activity(green_mask, t, fh, fw)]
+
+
+def _tile_has_activity(
+    green_mask: np.ndarray,
+    tile: TileRegion,
+    fh: int,
+    fw: int,
+) -> bool:
+    """Return True if any active-speaker cue fires for this tile's ROI."""
+    x1, y1 = max(0, tile.x), max(0, tile.y)
+    x2, y2 = min(fw, tile.x + tile.w), min(fh, tile.y + tile.h)
+    if x2 <= x1 or y2 <= y1:
+        return False
+
+    roi = green_mask[y1:y2, x1:x2]
+    if roi.size == 0:
+        return False
+    th, tw = y2 - y1, x2 - x1
+
+    # --- Cue 1: mic-icon blob (small green region, most distinctive) ---
+    # Morphological closing reconnects codec-fragmented pixels.
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    closed = cv2.morphologyEx(roi, cv2.MORPH_CLOSE, kernel)
+    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    for cnt in contours:
+        if _MIC_AREA_MIN <= cv2.contourArea(cnt) <= _MIC_AREA_MAX:
+            return True
+
+    # --- Cue 2: green border/outline around tile perimeter ---
+    # WebEx draws a thin green rectangle around the active speaker's tile.
+    # Use ~4% of each dimension as the border strip width.
+    bw = max(3, tw // 25)
+    bh = max(3, th // 25)
+    top    = roi[:bh, :]
+    bottom = roi[max(0, th - bh):, :]
+    left   = roi[:, :bw]
+    right  = roi[:, max(0, tw - bw):]
+    perim_total = top.size + bottom.size + left.size + right.size
+    if perim_total > 0:
+        perim_green = (int(top.sum()) + int(bottom.sum()) +
+                       int(left.sum()) + int(right.sum())) // 255
+        if perim_green / perim_total > 0.08:   # ≥8% of perimeter is green
+            return True
+
+    # --- Cue 3: green-highlighted name strip at tile bottom ---
+    # In some WebEx versions the entire bottom label bar turns green on the
+    # active speaker's tile.  Check the bottom 30% of the tile ROI.
+    name_top = int(th * 0.70)
+    name_roi = roi[name_top:, :]
+    if name_roi.size > 0:
+        name_ratio = int(name_roi.sum()) // 255 / name_roi.size
+        if name_ratio > 0.10:   # ≥10% of name strip is green
+            return True
+
+    return False
+
+
 def find_mic_blobs(frame: np.ndarray) -> list[tuple[int, int, int, int]]:
     """Return list of (x, y, w, h) bounding boxes of green mic candidates."""
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)

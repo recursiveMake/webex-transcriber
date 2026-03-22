@@ -19,7 +19,14 @@ from typing import Sequence
 import cv2
 import numpy as np
 
-from .layout import TileRegion, find_mic_blobs, infer_tile_from_mic, _blob_centre, _distance
+from .layout import (
+    TileRegion,
+    find_active_tiles,
+    find_mic_blobs,
+    infer_tile_from_mic,
+    _blob_centre,
+    _distance,
+)
 
 log = logging.getLogger(__name__)
 
@@ -197,67 +204,79 @@ class SpeakerDetector:
         self,
         frame: np.ndarray,
         layout_tiles: list[TileRegion] | None = None,
+        allow_new_ocr: bool = True,
     ) -> list[ActiveSpeaker]:
         """Detect active speakers in a single BGR frame.
 
         Args:
             frame: BGR image array.
-            layout_tiles: Pre-detected tile regions (optional). When provided,
-                only green blobs within known tiles are considered. When None,
-                the full frame is searched.
+            layout_tiles: Pre-detected tile regions (optional).  When provided,
+                all three WebEx cues (mic icon, tile border, name highlight) are
+                checked for each known tile.  When None, falls back to raw
+                green-blob detection across the whole frame.
+            allow_new_ocr: When False, skip OCR for unseen tile positions and
+                rely solely on the name cache.  Used outside the 5–95% video
+                window to avoid OCR calls during dynamic meeting start/end.
+                Tiles with no cached name are silently dropped in this mode.
 
         Returns:
-            List of ActiveSpeaker records (may be empty or have multiple entries
-            in the rare case of simultaneous green mics).
+            List of ActiveSpeaker records (empty if no activity detected).
         """
-        blobs = find_mic_blobs(frame)
-        if not blobs:
-            return []
-
         h, w = frame.shape[:2]
 
-        # Filter blobs to those inside known tile regions, if available
         if layout_tiles:
-            filtered = []
-            for blob in blobs:
-                cx, cy = _blob_centre(blob)
-                for tile in layout_tiles:
-                    if (tile.x <= cx <= tile.x + tile.w and
-                            tile.y <= cy <= tile.y + tile.h):
-                        filtered.append(blob)
-                        break
-            if filtered:
-                blobs = filtered
-            else:
-                log.debug(
-                    "No blobs found inside known layout tiles — searching full frame instead"
-                )
-                blobs = blobs  # noqa: PLW0127 (explicit no-op for clarity)
+            # Multi-cue detection: mic icon OR tile border OR name highlight.
+            # Tiles come directly from the layout snapshot (stable mic_x/mic_y
+            # used as the name-cache key).
+            active_tiles = find_active_tiles(frame, layout_tiles)
+        else:
+            # No layout knowledge yet — fall back to raw blob detection.
+            blobs = find_mic_blobs(frame)
+            if not blobs:
+                return []
+            blobs = _deduplicate_blobs(blobs, self._mic_cluster_radius)
+            active_tiles = [infer_tile_from_mic(blob, h, w) for blob in blobs]
 
-        # Deduplicate overlapping blobs (keep largest)
-        blobs = _deduplicate_blobs(blobs, self._mic_cluster_radius)
+        if not active_tiles:
+            return []
 
+        reader = get_reader() if allow_new_ocr else None
         speakers: list[ActiveSpeaker] = []
-        reader = get_reader()
 
-        for blob in blobs:
-            tile = infer_tile_from_mic(blob, h, w)
-
-            # Try cache first
+        for tile in active_tiles:
             cached = self._cache.get(tile)
+
             if cached and cached[1] >= self._cache_min_confidence:
                 name, conf = cached
-                log.debug("Cache hit for tile (%d,%d): %r (conf=%.2f)", tile.mic_x, tile.mic_y, name, conf)
-            else:
+                log.debug(
+                    "Cache hit for tile (%d,%d): %r (conf=%.2f)",
+                    tile.mic_x, tile.mic_y, name, conf,
+                )
+            elif allow_new_ocr:
                 name, conf = ocr_tile_name(frame, tile, reader)
                 if name:
                     log.info("OCR identified new participant: %r (conf=%.2f)", name, conf)
                     self._cache.put(tile, name, conf)
                 elif cached:
-                    name, conf = cached  # fall back to lower-confidence cached value
-                    log.debug("OCR failed; using cached name %r for tile (%d,%d)", name, tile.mic_x, tile.mic_y)
+                    name, conf = cached
+                    log.debug(
+                        "OCR failed; using cached name %r for tile (%d,%d)",
+                        name, tile.mic_x, tile.mic_y,
+                    )
                 else:
-                    log.warning("Could not identify speaker at tile (%d,%d) — no OCR result and no cache", tile.mic_x, tile.mic_y)
+                    log.warning(
+                        "Could not identify speaker at tile (%d,%d) — "
+                        "no OCR result and no cache",
+                        tile.mic_x, tile.mic_y,
+                    )
+                    name, conf = "", 0.0
+            else:
+                # OCR disabled for this frame (outside the 5–95% window).
+                # Use lower-confidence cached name if available; otherwise drop.
+                if cached:
+                    name, conf = cached
+                else:
+                    name, conf = "", 0.0
 
             if name:
                 speakers.append(ActiveSpeaker(name=name, tile=tile, confidence=conf))

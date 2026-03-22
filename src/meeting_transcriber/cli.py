@@ -42,7 +42,7 @@ err_console = Console(stderr=True)
 @click.option(
     "--frame-interval",
     type=float,
-    default=1.0,
+    default=0.5,
     show_default=True,
     help="Seconds between sampled frames for speaker detection.",
 )
