@@ -235,7 +235,7 @@ Audio and frame extraction run in two threads simultaneously (both are ffmpeg su
 
 Within speaker detection, a background thread pre-loads JPEG frames from disk into a bounded queue (depth 8) while the main thread processes them, hiding disk I/O latency behind computation.
 
-EasyOCR is expensive (~500 ms per call) but is only ever called once per unique tile position, and only within the 5%–95% window of the video — avoiding the dynamic join/leave period at the start and end. Subsequent frames are O(1) cache lookups. For a 1-hour meeting with 10 participants, that is at most 10 OCR calls regardless of meeting length.
+EasyOCR is expensive (~500 ms per call) but is only ever called once per unique tile position across the entire video — subsequent frames are O(1) cache lookups. For a 1-hour meeting with 10 participants, that is at most 10 OCR calls regardless of meeting length.
 
 ---
 

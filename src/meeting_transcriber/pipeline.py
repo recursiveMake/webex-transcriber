@@ -176,24 +176,6 @@ def _run_speaker_detection(
     )
     detector = SpeakerDetector(mic_cluster_radius=config.mic_cluster_radius)
 
-    # OCR window: restrict new participant-name OCR to 5%–95% of the video to
-    # avoid the dynamic situations at meeting start (join animations, layout
-    # changes) and end (leave notifications).  Cached names are still used
-    # outside this window; only new OCR calls are suppressed.
-    if len(frames) >= 2:
-        first_ts, last_ts = frames[0][0], frames[-1][0]
-        span = last_ts - first_ts
-        ocr_start = first_ts + span * 0.05
-        ocr_end   = first_ts + span * 0.95
-    else:
-        # Too few frames to apply the window; allow OCR everywhere.
-        ocr_start, ocr_end = 0.0, float("inf")
-
-    log.info(
-        "OCR window: %.1fs – %.1fs (5%%–95%% of video)",
-        ocr_start, ocr_end,
-    )
-
     # Start prefetch thread
     queue: Queue = Queue(maxsize=_PREFETCH_DEPTH)
     prefetch_thread = Thread(
@@ -212,8 +194,7 @@ def _run_speaker_detection(
         ts, frame = item
         layout = tracker.update(ts, frame)
         layout_tiles = layout.tiles if layout else None
-        allow_ocr = (ocr_start <= ts <= ocr_end)
-        active = detector.process_frame(frame, layout_tiles=layout_tiles, allow_new_ocr=allow_ocr)
+        active = detector.process_frame(frame, layout_tiles=layout_tiles)
         results.append((ts, active))
         processed += 1
 
