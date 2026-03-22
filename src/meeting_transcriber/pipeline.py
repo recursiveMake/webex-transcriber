@@ -43,7 +43,6 @@ from threading import Thread
 from typing import Callable
 
 import cv2
-from rich.console import Console
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -60,10 +59,10 @@ from meeting_transcriber.speaker.layout import LayoutTracker
 from meeting_transcriber.speaker.timeline import SpeakerSpan, build_timeline
 from meeting_transcriber.summary.generator import SummaryGenerator
 from meeting_transcriber.transcription.whisper import TranscriptionResult, WhisperTranscriber
+from meeting_transcriber.logging_config import console
 from meeting_transcriber.video.extractor import VideoExtractor
 
 log = logging.getLogger(__name__)
-console = Console(stderr=True)
 
 # Frames to pre-load into the queue ahead of processing.
 # Larger → more RAM; smaller → more stalls.  8 is a good trade-off.

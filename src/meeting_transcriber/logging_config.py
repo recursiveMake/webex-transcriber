@@ -1,8 +1,12 @@
 """Logging configuration for meeting-transcriber.
 
-Sets up a single root logger for the ``meeting_transcriber`` package using
-Python's standard ``logging`` module.  Rich is used for console output only
-in the CLI/pipeline; library code emits plain log records.
+All output — both log records and Rich progress bars — must go through the
+**same** ``rich.console.Console`` instance.  When two writers share the same
+file descriptor but are unaware of each other, Rich redraws its progress bars
+on top of any text written between frames, producing duplicated/jumped lines.
+
+Using ``RichHandler(console=console)`` routes log records through Rich's live
+display engine, so it can interleave them cleanly above the progress bar.
 
 Log levels:
   DEBUG   — per-frame detail, cache hits/misses, blob counts
@@ -14,16 +18,21 @@ Log levels:
 from __future__ import annotations
 
 import logging
-import sys
 
+from rich.console import Console
+from rich.logging import RichHandler
+
+# ---------------------------------------------------------------------------
+# Shared console — import this wherever Rich output is needed so that the
+# progress bars and the log handler always use the same instance.
+# ---------------------------------------------------------------------------
+console = Console(stderr=True)
 
 _PACKAGE = "meeting_transcriber"
-_FMT = "%(asctime)s  %(levelname)-8s  %(name)s  %(message)s"
-_DATE_FMT = "%H:%M:%S"
 
 
 def setup(level: int = logging.INFO, *, quiet: bool = False) -> None:
-    """Configure package-level logging.
+    """Configure package-level logging via Rich.
 
     Args:
         level: Root log level for the ``meeting_transcriber`` package.
@@ -38,9 +47,14 @@ def setup(level: int = logging.INFO, *, quiet: bool = False) -> None:
     if pkg_logger.handlers:
         return
 
-    handler = logging.StreamHandler(sys.stderr)
+    handler = RichHandler(
+        console=console,       # same instance as the progress bars
+        show_path=False,       # don't print source file:line
+        rich_tracebacks=False,
+        markup=False,          # don't interpret log strings as Rich markup
+        log_time_format="[%H:%M:%S]",
+    )
     handler.setLevel(effective)
-    handler.setFormatter(logging.Formatter(_FMT, datefmt=_DATE_FMT))
     pkg_logger.addHandler(handler)
 
     # Suppress overly chatty third-party loggers that leak through
