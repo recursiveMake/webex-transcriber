@@ -76,21 +76,28 @@ DEFAULT_MODEL = "large-v3"
 class WhisperTranscriber:
     """Wraps mlx-whisper for Apple Silicon optimised transcription.
 
+    mlx-whisper uses temperature-based sampling, not beam search.
+    At temperature=0 it is fully greedy (deterministic, fast).  The library
+    automatically retries at higher temperatures if a segment's compression
+    ratio or average log-probability indicates a likely hallucination.
+
     Args:
         model: Whisper model name (e.g. ``"large-v3"``, ``"medium"``).
         language: Force language (``"en"`` for English). None = auto-detect.
-        beam_size: Beam search width (higher = more accurate, slower).
+        temperature: Initial decoding temperature.  0.0 = greedy (default).
+            Pass a tuple to override the full fallback schedule, e.g.
+            ``(0.0, 0.2, 0.4)`` for a three-step schedule.
     """
 
     def __init__(
         self,
         model: str = DEFAULT_MODEL,
         language: str | None = "en",
-        beam_size: int = 5,
+        temperature: float | tuple[float, ...] = 0.0,
     ) -> None:
         self.model = model
         self.language = language
-        self.beam_size = beam_size
+        self.temperature = temperature
 
     def transcribe(self, audio_path: Path) -> TranscriptionResult:
         """Transcribe a WAV file and return word-level timestamped results."""
@@ -102,8 +109,8 @@ class WhisperTranscriber:
 
         repo = f"mlx-community/whisper-{self.model}-mlx"
         log.info(
-            "Starting Whisper transcription: model=%s, beam_size=%d, language=%s",
-            self.model, self.beam_size, self.language or "auto",
+            "Starting Whisper transcription: model=%s, temperature=%s, language=%s",
+            self.model, self.temperature, self.language or "auto",
         )
         log.info("Model repo: %s (will download on first use)", repo)
 
@@ -112,7 +119,7 @@ class WhisperTranscriber:
             path_or_hf_repo=repo,
             word_timestamps=True,
             language=self.language,
-            beam_size=self.beam_size,
+            temperature=self.temperature,
         )
 
         parsed = self._parse_result(result)
@@ -170,7 +177,7 @@ def transcribe(
     audio_path: Path,
     model: str = DEFAULT_MODEL,
     language: str | None = "en",
-    beam_size: int = 5,
+    temperature: float | tuple[float, ...] = 0.0,
 ) -> TranscriptionResult:
     """Transcribe audio and return word-level timestamped results."""
-    return WhisperTranscriber(model=model, language=language, beam_size=beam_size).transcribe(audio_path)
+    return WhisperTranscriber(model=model, language=language, temperature=temperature).transcribe(audio_path)

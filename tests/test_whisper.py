@@ -111,6 +111,28 @@ class TestTranscriberMocked:
         assert isinstance(result, TranscriptionResult)
         assert len(result.segments) == 2
 
+    def test_temperature_passed_not_beam_size(self, tmp_path):
+        """mlx-whisper does not support beam_size; ensure temperature is used instead."""
+        wav = tmp_path / "audio.wav"
+        wav.write_bytes(b"\x00" * 44)
+
+        with patch("mlx_whisper.transcribe", return_value=_MOCK_RAW) as mock_fn:
+            WhisperTranscriber(model="tiny", temperature=0.0).transcribe(wav)
+
+        _, kwargs = mock_fn.call_args
+        assert "temperature" in kwargs
+        assert "beam_size" not in kwargs
+
+    def test_custom_temperature_forwarded(self, tmp_path):
+        wav = tmp_path / "audio.wav"
+        wav.write_bytes(b"\x00" * 44)
+
+        with patch("mlx_whisper.transcribe", return_value=_MOCK_RAW) as mock_fn:
+            WhisperTranscriber(model="tiny", temperature=0.2).transcribe(wav)
+
+        _, kwargs = mock_fn.call_args
+        assert kwargs["temperature"] == 0.2
+
     def test_transcribe_missing_file_raises(self):
         t = WhisperTranscriber(model="tiny")
         with pytest.raises(FileNotFoundError):

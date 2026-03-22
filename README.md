@@ -92,6 +92,8 @@ meeting-transcriber [OPTIONS] VIDEO
 
 Models are downloaded from Hugging Face on first use and cached locally. `large-v3` is ~3 GB on disk.
 
+> **Note:** mlx-whisper uses greedy decoding with automatic temperature fallback rather than beam search. This is the correct behaviour for the MLX framework and does not reduce accuracy compared to standard Whisper.
+
 ---
 
 ## Useful Configurations

@@ -79,8 +79,10 @@ class PipelineConfig:
     """Tunable parameters for the processing pipeline."""
 
     # Whisper
+    # mlx-whisper uses temperature-based sampling; beam search is not supported.
+    # temperature=0.0 → greedy decoding (deterministic, fastest, high quality).
     whisper_model: str = "large-v3"
-    whisper_beam_size: int = 5
+    whisper_temperature: float = 0.0
 
     # Frame sampling
     frame_interval: float = 1.0       # seconds between sampled frames
@@ -295,7 +297,7 @@ class Pipeline:
                 nonlocal transcription_result
                 t = WhisperTranscriber(
                     model=cfg.whisper_model,
-                    beam_size=cfg.whisper_beam_size,
+                    temperature=cfg.whisper_temperature,
                 )
                 transcription_result = t.transcribe(audio_path)
                 progress.update(
