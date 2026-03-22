@@ -103,7 +103,10 @@ class PipelineConfig:
     # Use a generous merge gap and padding to bridge those gaps.
     timeline_merge_gap: float = 3.0   # seconds; merge same-speaker gaps
     min_span_duration: float = 0.5    # drop spans shorter than this
-    timeline_onset_pad: float = 1.0   # expand span starts back by ~1 s
+    # onset_pad absorbs two compounding delays:
+    #   ~1 s WebEx visual lag before the green cue appears after speech starts
+    #   ~1-2 s identification delay when layout re-detection is triggered
+    timeline_onset_pad: float = 2.5   # expand span starts back by ~2.5 s
     timeline_offset_pad: float = 0.5  # expand span ends forward by ~0.5 s
     # Temporal smoothing: majority-vote window over N consecutive frames
     timeline_smoothing_window: int = 3
@@ -174,14 +177,18 @@ def _run_speaker_detection(
     """
     log.info("Speaker detection starting: %d frames to process", len(frames))
 
-    tracker = LayoutTracker(
-        window=config.layout_window,
-        drift_threshold=config.layout_drift_threshold,
-    )
     detector = SpeakerDetector(
         mic_cluster_radius=config.mic_cluster_radius,
         reocr_interval=config.reocr_interval,
     )
+    tracker = LayoutTracker(
+        window=config.layout_window,
+        drift_threshold=config.layout_drift_threshold,
+        on_invalidate=detector.invalidate_cache,
+    )
+    # Wire OCR-failure invalidation: persistent OCR failures signal a stale
+    # layout and should trigger a full reset (same path as drift invalidation).
+    detector._on_layout_invalidate = tracker.invalidate
 
     # Start prefetch thread
     queue: Queue = Queue(maxsize=_PREFETCH_DEPTH)
@@ -201,7 +208,7 @@ def _run_speaker_detection(
         ts, frame = item
         layout = tracker.update(ts, frame)
         layout_tiles = layout.tiles if layout else None
-        active = detector.process_frame(frame, layout_tiles=layout_tiles)
+        active = detector.process_frame(frame, layout_tiles=layout_tiles, timestamp=ts)
 
         # Promote every identified speaker into the accumulated layout so
         # subsequent frames use the primary path with a stable tile position.
