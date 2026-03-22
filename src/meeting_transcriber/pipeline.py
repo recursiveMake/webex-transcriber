@@ -202,6 +202,13 @@ def _run_speaker_detection(
         layout = tracker.update(ts, frame)
         layout_tiles = layout.tiles if layout else None
         active = detector.process_frame(frame, layout_tiles=layout_tiles)
+
+        # Promote every identified speaker into the accumulated layout so
+        # subsequent frames use the primary path with a stable tile position.
+        # _merge is idempotent for tiles already within the drift threshold.
+        for speaker in active:
+            tracker.add_tile(speaker.tile, ts)
+
         results.append((ts, active))
         processed += 1
 

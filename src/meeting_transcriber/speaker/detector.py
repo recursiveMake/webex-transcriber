@@ -103,7 +103,10 @@ class _NameCache:
         self._cache: dict[tuple[int, int], tuple[str, float, int]] = {}
 
     def _key(self, tile: TileRegion) -> tuple[int, int]:
-        return tile.mic_x // self._bucket, tile.mic_y // self._bucket
+        # round() rather than // places the bucket boundary at the midpoint
+        # (bucket/2 px) instead of the edge (0 px), so blob centroid jitter
+        # of a few pixels no longer flips the key at a boundary.
+        return round(tile.mic_x / self._bucket), round(tile.mic_y / self._bucket)
 
     def get(self, tile: TileRegion) -> tuple[str, float] | None:
         """Return cached (name, confidence), or None if missing or expired."""

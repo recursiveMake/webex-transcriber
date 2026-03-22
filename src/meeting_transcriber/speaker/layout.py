@@ -352,6 +352,16 @@ class LayoutTracker:
         self._merge(candidate.tiles, timestamp)
         return self.current
 
+    def add_tile(self, tile: TileRegion, timestamp: float) -> None:
+        """Immediately merge a single confirmed tile into the accumulated layout.
+
+        Called by the pipeline when OCR successfully identifies a speaker found
+        via the secondary blob-scan path.  Once the tile is in the layout, future
+        frames will use the primary ``find_active_tiles`` path with a stable,
+        stored position rather than re-inferring a fresh tile each frame.
+        """
+        self._merge([tile], timestamp)
+
     def _merge(self, new_tiles: list[TileRegion], timestamp: float) -> None:
         """Merge newly detected tiles into the accumulated set.
 
