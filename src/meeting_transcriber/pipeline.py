@@ -92,6 +92,10 @@ class PipelineConfig:
     layout_window: int = 10           # frames for layout accumulation
     layout_drift_threshold: int = 80  # px drift before re-calibration
     mic_cluster_radius: int = 40      # px radius for blob deduplication
+    # Re-verify a cached name via OCR every N cache hits (~60 s at 0.5 s/frame).
+    # Catches the case where a layout reflow places a different person at a
+    # position previously associated with someone else.
+    reocr_interval: int = 120
 
     # Timeline
     # WebEx visual cues (green mic, tile border, name highlight) can lag actual
@@ -174,7 +178,10 @@ def _run_speaker_detection(
         window=config.layout_window,
         drift_threshold=config.layout_drift_threshold,
     )
-    detector = SpeakerDetector(mic_cluster_radius=config.mic_cluster_radius)
+    detector = SpeakerDetector(
+        mic_cluster_radius=config.mic_cluster_radius,
+        reocr_interval=config.reocr_interval,
+    )
 
     # Start prefetch thread
     queue: Queue = Queue(maxsize=_PREFETCH_DEPTH)

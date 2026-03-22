@@ -87,33 +87,52 @@ class _NameCache:
 
     A position key is the (mic_x // bucket, mic_y // bucket) cell, so
     small jitter between frames maps to the same cache entry.
+
+    Each entry tracks how many times it has been served from cache without
+    re-OCR verification.  After ``reocr_interval`` hits the entry is treated
+    as expired: the next detection at that position runs OCR again.  This
+    catches the case where a layout reflow places a *different* person at a
+    position previously associated with someone else — even when the pixel
+    coordinates did not change (so the LayoutTracker cannot detect a shift).
     """
 
-    def __init__(self, bucket: int = 30) -> None:
+    def __init__(self, bucket: int = 30, reocr_interval: int = 120) -> None:
         self._bucket = bucket
-        self._cache: dict[tuple[int, int], tuple[str, float]] = {}
+        self._reocr_interval = reocr_interval
+        # Value: (name, confidence, hit_count)
+        self._cache: dict[tuple[int, int], tuple[str, float, int]] = {}
 
     def _key(self, tile: TileRegion) -> tuple[int, int]:
         return tile.mic_x // self._bucket, tile.mic_y // self._bucket
 
     def get(self, tile: TileRegion) -> tuple[str, float] | None:
-        return self._cache.get(self._key(tile))
+        """Return cached (name, confidence), or None if missing or expired."""
+        key = self._key(tile)
+        entry = self._cache.get(key)
+        if entry is None:
+            return None
+        name, conf, hits = entry
+        if hits >= self._reocr_interval:
+            # Entry has aged out — force a fresh OCR on next call.
+            return None
+        self._cache[key] = (name, conf, hits + 1)
+        return name, conf
 
     def put(self, tile: TileRegion, name: str, confidence: float) -> None:
         key = self._key(tile)
         # If this name is already known at a different position (layout reflow
         # shifted the participant's tile), remove the stale entry so we don't
         # accumulate duplicate keys for the same person.
-        for stale_key, (stale_name, _) in list(self._cache.items()):
+        for stale_key, (stale_name, _, _) in list(self._cache.items()):
             if stale_name == name and stale_key != key:
                 del self._cache[stale_key]
                 break
         existing = self._cache.get(key)
         if existing is None or confidence > existing[1]:
-            self._cache[key] = (name, confidence)
+            self._cache[key] = (name, confidence, 0)  # reset hit counter
 
     def all_names(self) -> list[str]:
-        return [name for name, _ in self._cache.values()]
+        return [name for name, _, _ in self._cache.values()]
 
 
 # ---------------------------------------------------------------------------
@@ -223,8 +242,9 @@ class SpeakerDetector:
         self,
         cache_min_confidence: float = 0.5,
         mic_cluster_radius: int = 40,
+        reocr_interval: int = 120,
     ) -> None:
-        self._cache = _NameCache()
+        self._cache = _NameCache(reocr_interval=reocr_interval)
         self._cache_min_confidence = cache_min_confidence
         self._mic_cluster_radius = mic_cluster_radius
 
