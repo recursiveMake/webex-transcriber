@@ -135,17 +135,6 @@ class _NameCache:
 
     def put(self, tile: TileRegion, name: str, confidence: float) -> None:
         key = self._key(tile)
-        # If this name is already known at a different position (layout reflow
-        # shifted the participant's tile), remove the stale entry so we don't
-        # accumulate duplicate keys for the same person.
-        for stale_key, (stale_name, _, _) in list(self._cache.items()):
-            if stale_name == name and stale_key != key:
-                log.debug(
-                    "CACHE EVICT stale key=%s for %r (new key=%s mic=(%d,%d))",
-                    stale_key, name, key, tile.mic_x, tile.mic_y,
-                )
-                del self._cache[stale_key]
-                break
         existing = self._cache.get(key)
         if existing is None or confidence > existing[1]:
             log.debug(
@@ -434,6 +423,24 @@ class SpeakerDetector:
 
             if name:
                 speakers.append(ActiveSpeaker(name=name, tile=tile, confidence=conf))
+
+        # Deduplicate by name: two tiles resolving to the same person (e.g. a
+        # participant thumbnail and a name-bar overlay both reading as "Philip")
+        # would otherwise cause repeated cache evictions that produce a cache
+        # miss on every frame.  Keep the highest-confidence entry per name.
+        if len(speakers) > 1:
+            best: dict[str, ActiveSpeaker] = {}
+            for s in speakers:
+                if s.name not in best or s.confidence > best[s.name].confidence:
+                    best[s.name] = s
+            deduped = list(best.values())
+            if len(deduped) < len(speakers):
+                log.debug(
+                    "Deduplicated %d→%d speakers: %s",
+                    len(speakers), len(deduped),
+                    [s.name for s in deduped],
+                )
+            speakers = deduped
 
         return speakers
 
