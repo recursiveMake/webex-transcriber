@@ -113,12 +113,24 @@ class _NameCache:
         key = self._key(tile)
         entry = self._cache.get(key)
         if entry is None:
+            log.debug(
+                "CACHE MISS  mic=(%d,%d) key=%s  cache_keys=%s",
+                tile.mic_x, tile.mic_y, key,
+                list(self._cache.keys()),
+            )
             return None
         name, conf, hits = entry
         if hits >= self._reocr_interval:
-            # Entry has aged out — force a fresh OCR on next call.
+            log.debug(
+                "CACHE EXPIRED  mic=(%d,%d) key=%s  name=%r hits=%d",
+                tile.mic_x, tile.mic_y, key, name, hits,
+            )
             return None
         self._cache[key] = (name, conf, hits + 1)
+        log.debug(
+            "CACHE HIT  mic=(%d,%d) key=%s  name=%r conf=%.2f hits=%d",
+            tile.mic_x, tile.mic_y, key, name, conf, hits + 1,
+        )
         return name, conf
 
     def put(self, tile: TileRegion, name: str, confidence: float) -> None:
@@ -128,11 +140,25 @@ class _NameCache:
         # accumulate duplicate keys for the same person.
         for stale_key, (stale_name, _, _) in list(self._cache.items()):
             if stale_name == name and stale_key != key:
+                log.debug(
+                    "CACHE EVICT stale key=%s for %r (new key=%s mic=(%d,%d))",
+                    stale_key, name, key, tile.mic_x, tile.mic_y,
+                )
                 del self._cache[stale_key]
                 break
         existing = self._cache.get(key)
         if existing is None or confidence > existing[1]:
+            log.debug(
+                "CACHE STORE  mic=(%d,%d) key=%s  name=%r conf=%.2f",
+                tile.mic_x, tile.mic_y, key, name, confidence,
+            )
             self._cache[key] = (name, confidence, 0)  # reset hit counter
+        else:
+            log.debug(
+                "CACHE SKIP STORE  mic=(%d,%d) key=%s  name=%r "
+                "new_conf=%.2f <= existing_conf=%.2f",
+                tile.mic_x, tile.mic_y, key, name, confidence, existing[1],
+            )
 
     def all_names(self) -> list[str]:
         return [name for name, _, _ in self._cache.values()]
@@ -276,8 +302,18 @@ class SpeakerDetector:
         h, w = frame.shape[:2]
 
         if layout_tiles:
+            log.debug(
+                "LAYOUT known tiles: %s",
+                [(t.mic_x, t.mic_y) for t in layout_tiles],
+            )
+
             # Primary path: check all three cues on known tile positions.
             active_tiles = find_active_tiles(frame, layout_tiles)
+            log.debug(
+                "PRIMARY path found %d active tile(s): %s",
+                len(active_tiles),
+                [(t.mic_x, t.mic_y) for t in active_tiles],
+            )
 
             # Secondary path: also scan the full frame for blobs to catch
             # speakers whose tile may not have fired via the multi-cue check,
@@ -292,6 +328,11 @@ class SpeakerDetector:
             # reference and therefore a stable cache key.
             blobs = find_mic_blobs(frame)
             blobs = _deduplicate_blobs(blobs, self._mic_cluster_radius)
+            log.debug(
+                "SECONDARY blob scan found %d blob(s): %s",
+                len(blobs),
+                [_blob_centre(b) for b in blobs],
+            )
             for blob in blobs:
                 cx, cy = _blob_centre(blob)
                 closest = min(
@@ -299,19 +340,43 @@ class SpeakerDetector:
                     key=lambda t: _distance((cx, cy), (t.mic_x, t.mic_y)),
                     default=None,
                 )
-                if closest is not None and _distance(
-                    (cx, cy), (closest.mic_x, closest.mic_y)
-                ) <= self._mic_cluster_radius:
-                    # Near a known tile — use the stored tile (stable cache key).
-                    if closest not in active_tiles:
-                        active_tiles.append(closest)
+                if closest is not None:
+                    dist = _distance((cx, cy), (closest.mic_x, closest.mic_y))
+                    log.debug(
+                        "SECONDARY blob (%d,%d) → closest known mic=(%d,%d) dist=%.1fpx "
+                        "(radius=%dpx)",
+                        cx, cy, closest.mic_x, closest.mic_y, dist,
+                        self._mic_cluster_radius,
+                    )
+                    if dist <= self._mic_cluster_radius:
+                        if closest not in active_tiles:
+                            log.debug(
+                                "SECONDARY blob (%d,%d) matched known tile mic=(%d,%d) "
+                                "— using stored tile",
+                                cx, cy, closest.mic_x, closest.mic_y,
+                            )
+                            active_tiles.append(closest)
+                        else:
+                            log.debug(
+                                "SECONDARY blob (%d,%d) matched known tile mic=(%d,%d) "
+                                "— already in active_tiles",
+                                cx, cy, closest.mic_x, closest.mic_y,
+                            )
+                    else:
+                        log.debug(
+                            "SECONDARY blob (%d,%d) dist=%.1fpx > radius=%dpx "
+                            "— inferring new tile",
+                            cx, cy, dist, self._mic_cluster_radius,
+                        )
+                        active_tiles.append(infer_tile_from_mic(blob, h, w))
                 else:
                     log.debug(
-                        "Blob at (%d,%d) not near any known tile — new participant candidate",
+                        "SECONDARY blob (%d,%d) — no known tiles, inferring new tile",
                         cx, cy,
                     )
                     active_tiles.append(infer_tile_from_mic(blob, h, w))
         else:
+            log.debug("No layout yet — raw blob detection only")
             # No layout knowledge yet — raw blob detection only.
             blobs = find_mic_blobs(frame)
             if not blobs:
@@ -331,30 +396,37 @@ class SpeakerDetector:
             if cached and cached[1] >= self._cache_min_confidence:
                 name, conf = cached
                 log.debug(
-                    "Cache hit for tile (%d,%d): %r (conf=%.2f)",
+                    "NAME RESOLVED from cache  mic=(%d,%d)  name=%r conf=%.2f",
                     tile.mic_x, tile.mic_y, name, conf,
                 )
             elif allow_new_ocr:
+                log.debug(
+                    "OCR REQUIRED  mic=(%d,%d)  cached=%s",
+                    tile.mic_x, tile.mic_y,
+                    f"{cached[0]!r} conf={cached[1]:.2f} (below threshold {self._cache_min_confidence})"
+                    if cached else "none",
+                )
                 name, conf = ocr_tile_name(frame, tile, reader)
                 if name:
-                    log.info("OCR identified new participant: %r (conf=%.2f)", name, conf)
+                    log.info(
+                        "OCR identified participant: %r conf=%.2f  mic=(%d,%d)",
+                        name, conf, tile.mic_x, tile.mic_y,
+                    )
                     self._cache.put(tile, name, conf)
                 elif cached:
                     name, conf = cached
                     log.debug(
-                        "OCR failed; using cached name %r for tile (%d,%d)",
+                        "OCR returned empty; falling back to cached %r  mic=(%d,%d)",
                         name, tile.mic_x, tile.mic_y,
                     )
                 else:
                     log.warning(
-                        "Could not identify speaker at tile (%d,%d) — "
-                        "no OCR result and no cache",
+                        "Could not identify speaker at mic=(%d,%d) — "
+                        "OCR empty and no cache entry",
                         tile.mic_x, tile.mic_y,
                     )
                     name, conf = "", 0.0
             else:
-                # OCR disabled for this frame (outside the 5–95% window).
-                # Use lower-confidence cached name if available; otherwise drop.
                 if cached:
                     name, conf = cached
                 else:
