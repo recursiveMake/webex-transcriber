@@ -225,12 +225,28 @@ class SpeakerDetector:
         h, w = frame.shape[:2]
 
         if layout_tiles:
-            # Multi-cue detection: mic icon OR tile border OR name highlight.
-            # Tiles come directly from the layout snapshot (stable mic_x/mic_y
-            # used as the name-cache key).
+            # Primary path: check all three cues on known tile positions.
             active_tiles = find_active_tiles(frame, layout_tiles)
+
+            # Secondary path: also scan the full frame for blobs outside all
+            # known tiles.  This catches speakers who haven't been seen before
+            # and whose tile hasn't been added to the accumulated layout yet.
+            blobs = find_mic_blobs(frame)
+            blobs = _deduplicate_blobs(blobs, self._mic_cluster_radius)
+            for blob in blobs:
+                cx, cy = _blob_centre(blob)
+                in_known = any(
+                    t.x <= cx <= t.x + t.w and t.y <= cy <= t.y + t.h
+                    for t in layout_tiles
+                )
+                if not in_known:
+                    log.debug(
+                        "Blob at (%d,%d) outside known layout — new participant candidate",
+                        cx, cy,
+                    )
+                    active_tiles.append(infer_tile_from_mic(blob, h, w))
         else:
-            # No layout knowledge yet — fall back to raw blob detection.
+            # No layout knowledge yet — raw blob detection only.
             blobs = find_mic_blobs(frame)
             if not blobs:
                 return []

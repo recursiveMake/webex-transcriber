@@ -212,7 +212,7 @@ def _run_speaker_detection(
         ts, frame = item
         layout = tracker.update(ts, frame)
         layout_tiles = layout.tiles if layout else None
-        allow_ocr = ocr_start <= ts <= ocr_end
+        allow_ocr = (ocr_start <= ts <= ocr_end)
         active = detector.process_frame(frame, layout_tiles=layout_tiles, allow_new_ocr=allow_ocr)
         results.append((ts, active))
         processed += 1

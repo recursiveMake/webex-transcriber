@@ -301,8 +301,15 @@ def detect_layout(
 class LayoutTracker:
     """Maintains and updates layout estimates as the video progresses.
 
-    Calls ``detect_layout`` on a rolling window of recent frames and
-    re-calibrates when tile positions shift (screen share, late joiners).
+    Tiles are **accumulated** over time: once a participant's tile position is
+    discovered (because they spoke and showed a green cue), it is retained for
+    the rest of the meeting.  New speakers are merged into the known set as they
+    are detected; existing tile positions are updated if they drift significantly
+    (screen share, participant panel reflow).
+
+    This avoids the previous failure mode where the layout was replaced by a
+    smaller snapshot — e.g. if only 1 person spoke during the first window, only
+    1 tile would be recorded and all other participants would be invisible.
     """
 
     def __init__(
@@ -313,46 +320,67 @@ class LayoutTracker:
         self._window = window
         self._drift_threshold = drift_threshold
         self._buffer: list[tuple[float, np.ndarray]] = []
-        self._current: LayoutSnapshot | None = None
+        self._tiles: list[TileRegion] = []   # accumulated across entire meeting
+        self._frame_shape: tuple[int, int] = (0, 0)
+
+    @property
+    def current(self) -> LayoutSnapshot | None:
+        if not self._tiles:
+            return None
+        return LayoutSnapshot(
+            timestamp=0.0,
+            tiles=list(self._tiles),
+            frame_shape=self._frame_shape,
+        )
 
     def update(self, timestamp: float, frame: np.ndarray) -> LayoutSnapshot | None:
-        """Feed a new frame; returns updated LayoutSnapshot when ready."""
+        """Feed a new frame; returns the accumulated LayoutSnapshot."""
         self._buffer.append((timestamp, frame))
         if len(self._buffer) > self._window:
             self._buffer.pop(0)
 
         if len(self._buffer) < max(2, self._window // 3):
-            return self._current  # not enough data yet
+            return self.current  # not enough data yet
+
+        if self._frame_shape == (0, 0):
+            self._frame_shape = frame.shape[:2]
 
         candidate = detect_layout(self._buffer)
         if candidate is None:
-            return self._current
+            return self.current
 
-        # Check for significant drift vs current layout
-        if self._current is not None and self._has_drifted(candidate):
-            self._current = candidate
-        elif self._current is None:
-            self._current = candidate
+        self._merge(candidate.tiles, timestamp)
+        return self.current
 
-        return self._current
+    def _merge(self, new_tiles: list[TileRegion], timestamp: float) -> None:
+        """Merge newly detected tiles into the accumulated set.
 
-    def _has_drifted(self, new: LayoutSnapshot) -> bool:
-        if len(new.tiles) != len(self._current.tiles):  # type: ignore[union-attr]
-            old_n = len(self._current.tiles)  # type: ignore[union-attr]
-            log.info(
-                "Layout drift at %.1fs: tile count changed %d → %d",
-                new.timestamp, old_n, len(new.tiles),
-            )
-            return True
-        for old_tile, new_tile in zip(
-            sorted(self._current.tiles, key=lambda t: (t.y, t.x)),  # type: ignore[union-attr]
-            sorted(new.tiles, key=lambda t: (t.y, t.x)),
-        ):
-            dist = _distance(old_tile.centre, new_tile.centre)
-            if dist > self._drift_threshold:
+        For each new tile:
+        - If it is close to an existing tile (within drift_threshold), update
+          the existing tile's position if it has moved significantly.
+        - If it is far from all existing tiles, add it as a new participant.
+        """
+        for new_tile in new_tiles:
+            closest: TileRegion | None = None
+            closest_dist = float("inf")
+            for existing in self._tiles:
+                d = _distance(existing.centre, new_tile.centre)
+                if d < closest_dist:
+                    closest_dist = d
+                    closest = existing
+
+            if closest is None or closest_dist > self._drift_threshold:
+                # Never-seen position — new participant tile
                 log.info(
-                    "Layout drift at %.1fs: tile moved %.0fpx (threshold=%dpx)",
-                    new.timestamp, dist, self._drift_threshold,
+                    "New participant tile at %.1fs: mic position (%d, %d)",
+                    timestamp, new_tile.mic_x, new_tile.mic_y,
                 )
-                return True
-        return False
+                self._tiles.append(new_tile)
+            elif closest_dist > self._drift_threshold / 2:
+                # Same participant, position has drifted — update in place
+                log.info(
+                    "Tile position updated at %.1fs: moved %.0fpx",
+                    timestamp, closest_dist,
+                )
+                idx = self._tiles.index(closest)
+                self._tiles[idx] = new_tile
