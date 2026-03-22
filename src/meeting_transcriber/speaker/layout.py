@@ -2,15 +2,10 @@
 
 Strategy (no user input required):
 1. Sample frames distributed across the video.
-2. In each frame, find bright-green blobs — these are active mic icons.
-3. Cluster blob positions spatially; persistent clusters across frames are
-   real mic icons rather than noise.
-4. From the cluster positions infer tile boundaries by expanding each mic
-   location to a rectangular participant tile.
-5. Verify each tile contains OCR-readable text (the participant name).
-
-Handles layout changes (late joiners, screen-share shifts) by re-running
-layout detection when accumulated evidence drifts significantly.
+2. In each frame, find green-bordered tile rectangles — these are active
+   participant tiles as drawn by WebEx.
+3. Cluster tile positions across frames; persistent positions are real tiles.
+4. Accumulate discovered tiles over time; invalidate on layout drift.
 """
 
 from __future__ import annotations
@@ -18,8 +13,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
 import cv2
 import numpy as np
@@ -28,20 +22,26 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# WebEx green mic colour range (HSV, OpenCV 0-179 hue scale)
-# Calibrated to WebEx's bright-green active-speaker indicator.
+# WebEx green / teal active-speaker colour range (HSV, OpenCV 0-179 hue scale)
+# Widened to H:40-110 to capture the teal-leaning border variant seen in some
+# WebEx versions; S/V floors lowered to 100 to catch slightly desaturated cues.
 # ---------------------------------------------------------------------------
-_GREEN_LOWER = np.array([40, 120, 120], dtype=np.uint8)
-_GREEN_UPPER = np.array([90, 255, 255], dtype=np.uint8)
+_GREEN_LOWER = np.array([40, 100, 100], dtype=np.uint8)
+_GREEN_UPPER = np.array([110, 255, 255], dtype=np.uint8)
 
-# Mic icon size bounds in pixels (area)
+# Mic icon size bounds in pixels (area and linear dimension).
 _MIC_AREA_MIN = 15
-_MIC_AREA_MAX = 3000
+_MIC_AREA_MAX = 1200   # large blobs are borders or noise, not mic icons
+_MIC_DIM_MIN = 4       # minimum width or height in pixels
+_MIC_DIM_MAX = 40      # maximum width or height in pixels
 
-# Tile aspect ratio expected around each mic icon
-# WebEx tiles are approx 16:9 when camera on, ~1:1 for avatar tiles.
-_TILE_ASPECT_MIN = 0.5
-_TILE_ASPECT_MAX = 2.5
+# Minimum border rectangle dimensions — smaller candidates are noise.
+_BORDER_MIN_W = 40   # pixels
+_BORDER_MIN_H = 30   # pixels
+
+# A hollow border has most of its bounding-rect area NOT filled with green.
+# Filled blobs (mic icon, name strip) have a higher fill ratio.
+_BORDER_HOLLOW_RATIO = 0.5
 
 
 @dataclass
@@ -51,7 +51,7 @@ class TileRegion:
     y: int
     w: int
     h: int
-    mic_x: int  # mic icon centre within the frame
+    mic_x: int  # estimated mic icon centre within the frame
     mic_y: int
 
     @property
@@ -77,33 +77,111 @@ class LayoutSnapshot:
 
 
 # ---------------------------------------------------------------------------
-# Core detection helpers
+# Shared colour mask
+# ---------------------------------------------------------------------------
+
+def _build_green_mask(frame: np.ndarray) -> np.ndarray:
+    """Return the binary green/teal HSV mask for a BGR frame.
+
+    Called once per frame and shared across all detection functions so the
+    expensive colour-space conversion is not repeated.
+    """
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    return cv2.inRange(hsv, _GREEN_LOWER, _GREEN_UPPER)
+
+
+# ---------------------------------------------------------------------------
+# Border-first tile detection (primary)
+# ---------------------------------------------------------------------------
+
+def find_bordered_tiles(
+    frame: np.ndarray,
+    mask: np.ndarray | None = None,
+) -> list[TileRegion]:
+    """Detect participant tiles by their green border rectangles.
+
+    WebEx draws a green (or teal) rectangular outline around the active
+    speaker's tile.  Finding that outline directly gives the tile's true pixel
+    boundaries — far more reliable than inferring size from a mic blob.
+
+    Args:
+        frame: BGR frame array.
+        mask: Pre-computed green HSV mask (computed if not provided).
+
+    Returns:
+        List of TileRegion, one per detected bordered tile.  Tiles covering
+        more than 50% of the frame area are rejected as artifacts.
+    """
+    fh, fw = frame.shape[:2]
+    max_tile_area = fw * fh * 0.5
+
+    if mask is None:
+        mask = _build_green_mask(frame)
+
+    # Dilate slightly to connect fragmented border segments.
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    dilated = cv2.morphologyEx(mask, cv2.MORPH_DILATE, kernel)
+
+    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    tiles: list[TileRegion] = []
+    for cnt in contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+
+        if w < _BORDER_MIN_W or h < _BORDER_MIN_H:
+            continue
+        if w * h > max_tile_area:
+            log.debug(
+                "find_bordered_tiles: rejected oversized candidate %dx%d at (%d,%d)",
+                w, h, x, y,
+            )
+            continue
+
+        # A border is hollow — most of its bounding rect is NOT green.
+        # Use actual pixel count (not contourArea, which measures enclosed area
+        # and is ~w*h for any convex shape regardless of fill).
+        filled_pixels = cv2.countNonZero(dilated[y: y + h, x: x + w])
+        if w * h > 0 and (filled_pixels / (w * h)) > _BORDER_HOLLOW_RATIO:
+            continue  # filled blob, not a border
+
+        # Mic icon sits near the bottom centre of the tile.
+        mic_x = x + w // 2
+        mic_y = y + h - max(4, h // 10)
+
+        tiles.append(TileRegion(x=x, y=y, w=w, h=h, mic_x=mic_x, mic_y=mic_y))
+        log.debug(
+            "find_bordered_tiles: tile %dx%d at (%d,%d) mic=(%d,%d)",
+            w, h, x, y, mic_x, mic_y,
+        )
+
+    return tiles
+
+
+# ---------------------------------------------------------------------------
+# Multi-cue activity check on known tiles (fallback)
 # ---------------------------------------------------------------------------
 
 def find_active_tiles(
     frame: np.ndarray,
     tiles: list[TileRegion],
+    mask: np.ndarray | None = None,
 ) -> list[TileRegion]:
     """Return tiles where any WebEx active-speaker cue is detected.
 
-    Checks three cues in order; any one is sufficient to flag a tile active:
+    Checks three cues (mic blob, perimeter border, name-strip highlight).
+    Used as a fallback when border-first detection finds nothing.
 
-    1. **Green mic-icon blob** within the tile (small, distinctive).
-    2. **Green border/highlight** around the tile perimeter (thin outline
-       drawn by WebEx around the active speaker's thumbnail).
-    3. **Green name-strip highlight** at the bottom of the tile (the name
-       label background turns green on the active speaker's tile in some
-       WebEx versions).
-
-    Computing the HSV green mask once and sharing it across all tiles keeps
-    this O(frame_pixels + N_tiles) rather than O(N_tiles × frame_pixels).
+    Args:
+        frame: BGR frame array.
+        tiles: Known tile positions to check.
+        mask: Pre-computed green HSV mask (computed if not provided).
     """
     if not tiles:
         return []
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    green_mask = cv2.inRange(hsv, _GREEN_LOWER, _GREEN_UPPER)
+    if mask is None:
+        mask = _build_green_mask(frame)
     fh, fw = frame.shape[:2]
-    return [t for t in tiles if _tile_has_activity(green_mask, t, fh, fw)]
+    return [t for t in tiles if _tile_has_activity(mask, t, fh, fw)]
 
 
 def _tile_has_activity(
@@ -124,7 +202,6 @@ def _tile_has_activity(
     th, tw = y2 - y1, x2 - x1
 
     # --- Cue 1: mic-icon blob (small green region, most distinctive) ---
-    # Morphological closing reconnects codec-fragmented pixels.
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     closed = cv2.morphologyEx(roi, cv2.MORPH_CLOSE, kernel)
     contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -132,9 +209,7 @@ def _tile_has_activity(
         if _MIC_AREA_MIN <= cv2.contourArea(cnt) <= _MIC_AREA_MAX:
             return True
 
-    # --- Cue 2: green border/outline around tile perimeter ---
-    # WebEx draws a thin green rectangle around the active speaker's tile.
-    # Use ~4% of each dimension as the border strip width.
+    # --- Cue 2: green border around tile perimeter ---
     bw = max(3, tw // 25)
     bh = max(3, th // 25)
     top    = roi[:bh, :]
@@ -145,37 +220,46 @@ def _tile_has_activity(
     if perim_total > 0:
         perim_green = (int(top.sum()) + int(bottom.sum()) +
                        int(left.sum()) + int(right.sum())) // 255
-        if perim_green / perim_total > 0.08:   # ≥8% of perimeter is green
+        if perim_green / perim_total > 0.08:
             return True
 
     # --- Cue 3: green-highlighted name strip at tile bottom ---
-    # In some WebEx versions the entire bottom label bar turns green on the
-    # active speaker's tile.  Check the bottom 30% of the tile ROI.
     name_top = int(th * 0.70)
     name_roi = roi[name_top:, :]
     if name_roi.size > 0:
         name_ratio = int(name_roi.sum()) // 255 / name_roi.size
-        if name_ratio > 0.10:   # ≥10% of name strip is green
+        if name_ratio > 0.10:
             return True
 
     return False
 
 
+# ---------------------------------------------------------------------------
+# Mic blob helpers (bootstrap path only)
+# ---------------------------------------------------------------------------
+
 def find_mic_blobs(frame: np.ndarray) -> list[tuple[int, int, int, int]]:
-    """Return list of (x, y, w, h) bounding boxes of green mic candidates."""
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, _GREEN_LOWER, _GREEN_UPPER)
-    # Morphological closing to join fragmented blobs
+    """Return (x, y, w, h) bounding boxes of green mic-icon candidates.
+
+    Used only as a last-resort bootstrap when no layout is known and no
+    bordered tiles are detected.
+    """
+    mask = _build_green_mask(frame)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # RETR_LIST (not RETR_EXTERNAL) so mic blobs nested inside a border ring
+    # are still returned as individual contours.
+    contours, _ = cv2.findContours(mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
     blobs = []
     for cnt in contours:
         area = cv2.contourArea(cnt)
         if _MIC_AREA_MIN <= area <= _MIC_AREA_MAX:
             x, y, w, h = cv2.boundingRect(cnt)
-            aspect = w / h if h > 0 else 0
-            if 0.2 < aspect < 5:
+            if w < _MIC_DIM_MIN or h < _MIC_DIM_MIN:
+                continue
+            if w > _MIC_DIM_MAX or h > _MIC_DIM_MAX:
+                continue
+            if 0.2 < (w / h if h > 0 else 0) < 5:
                 blobs.append((x, y, w, h))
     return blobs
 
@@ -196,20 +280,16 @@ def infer_tile_from_mic(
 ) -> TileRegion:
     """Estimate participant tile extents from a mic icon blob.
 
-    WebEx places the mic icon near the bottom of each thumbnail tile.
-    We expand upward and sideways to approximate the tile boundary.
+    Tile dimensions are derived from frame size only — never from blob
+    dimensions, which can be unreliable.  Used only as a bootstrap fallback
+    when neither bordered tiles nor a known layout are available.
     """
-    bx, by, bw, bh = blob
     cx, cy = _blob_centre(blob)
 
-    # Heuristic tile dimensions relative to frame size.
-    # Tiles are typically 1/5 to 1/3 of the shorter frame dimension.
-    tile_side = max(bw * 6, min(frame_w, frame_h) // 5)
+    tile_side = min(frame_w, frame_h) // 5
     tile_w = tile_side
     tile_h = int(tile_side * 0.75)
 
-    # Mic icon sits in the lower ~20% of the tile
-    # so the tile top is roughly tile_h * 0.8 above the mic centre.
     tx = max(0, cx - tile_w // 2)
     ty = max(0, cy - int(tile_h * 0.85))
     tw = min(frame_w - tx, tile_w)
@@ -225,70 +305,64 @@ def infer_tile_from_mic(
 def detect_layout(
     frames: Sequence[tuple[float, np.ndarray]],
     *,
-    min_blob_frames: int = 2,
+    min_tile_frames: int = 2,
     cluster_radius: int = 40,
 ) -> LayoutSnapshot | None:
     """Detect participant tiles from a sample of (timestamp, frame) pairs.
 
+    Uses border detection on each frame — consistent with the primary per-frame
+    detection path.  Tiles that appear in multiple frames are considered stable.
+
     Args:
         frames: Sequence of (timestamp, BGR frame array) pairs.
-        min_blob_frames: A mic position must appear in at least this many
-            frames to be considered a real tile (filters noise).
-        cluster_radius: Pixel radius for merging nearby mic positions.
+        min_tile_frames: A tile position must appear in at least this many
+            frames to be considered stable (filters single-frame noise).
+        cluster_radius: Pixel radius for merging nearby tile centres.
 
     Returns:
-        A LayoutSnapshot, or None if no participant tiles were found.
+        A LayoutSnapshot, or None if no tiles were found.
     """
     if not frames:
         return None
 
     frame_h, frame_w = frames[0][1].shape[:2]
 
-    # Accumulate mic-icon centres AND sizes across all frames.
-    # Storing sizes lets us reconstruct a representative blob with realistic
-    # dimensions rather than a hardcoded 10×10 placeholder.
-    all_blobs: list[tuple[int, int, int, int]] = []  # (cx, cy, bw, bh)
+    # Collect all bordered tiles across the buffer.
+    all_tiles: list[TileRegion] = []
     for _ts, frame in frames:
-        for blob in find_mic_blobs(frame):
-            bx, by, bw, bh = blob
-            cx, cy = _blob_centre(blob)
-            all_blobs.append((cx, cy, bw, bh))
+        all_tiles.extend(find_bordered_tiles(frame))
 
-    if not all_blobs:
+    if not all_tiles:
         return None
 
-    # Cluster nearby centres (simple greedy clustering)
-    clusters: list[list[tuple[int, int, int, int]]] = []
-    for item in all_blobs:
-        cx, cy = item[0], item[1]
+    # Cluster tiles by centre position.
+    clusters: list[list[TileRegion]] = []
+    for tile in all_tiles:
         placed = False
         for cluster in clusters:
-            rep_cx, rep_cy = cluster[0][0], cluster[0][1]
-            if _distance((cx, cy), (rep_cx, rep_cy)) <= cluster_radius:
-                cluster.append(item)
+            rep = cluster[0]
+            if _distance(tile.centre, rep.centre) <= cluster_radius:
+                cluster.append(tile)
                 placed = True
                 break
         if not placed:
-            clusters.append([item])
+            clusters.append([tile])
 
-    # Keep only clusters that appeared in multiple frames
-    stable = [c for c in clusters if len(c) >= min_blob_frames]
+    stable = [c for c in clusters if len(c) >= min_tile_frames]
     if not stable:
-        # Relax threshold for very short clips / sparse sampling
-        stable = clusters
+        stable = clusters  # relax for short clips / sparse sampling
 
-    # Representative centre + size per cluster (all medians)
+    # Representative tile per cluster: median of all observed bounds.
     tiles: list[TileRegion] = []
     for cluster in stable:
-        cx = int(np.median([item[0] for item in cluster]))
-        cy = int(np.median([item[1] for item in cluster]))
-        bw = int(np.median([item[2] for item in cluster]))
-        bh = int(np.median([item[3] for item in cluster]))
-        # Use actual observed blob dimensions for accurate tile inference
-        half_w, half_h = max(1, bw // 2), max(1, bh // 2)
-        blob = (cx - half_w, cy - half_h, bw, bh)
-        tile = infer_tile_from_mic(blob, frame_h, frame_w)
-        tiles.append(tile)
+        tiles.append(TileRegion(
+            x=int(np.median([t.x for t in cluster])),
+            y=int(np.median([t.y for t in cluster])),
+            w=int(np.median([t.w for t in cluster])),
+            h=int(np.median([t.h for t in cluster])),
+            mic_x=int(np.median([t.mic_x for t in cluster])),
+            mic_y=int(np.median([t.mic_y for t in cluster])),
+        ))
 
     ts = frames[len(frames) // 2][0]
     return LayoutSnapshot(timestamp=ts, tiles=tiles, frame_shape=(frame_h, frame_w))
@@ -301,26 +375,24 @@ def detect_layout(
 class LayoutTracker:
     """Maintains and updates layout estimates as the video progresses.
 
-    Tiles are **accumulated** over time: once a participant's tile position is
-    discovered (because they spoke and showed a green cue), it is retained for
-    the rest of the meeting.  New speakers are merged into the known set as they
-    are detected; existing tile positions are updated if they drift significantly
-    (screen share, participant panel reflow).
+    The ``on_invalidate`` callback is called whenever the tile set is cleared
+    so the name cache can be soft-expired in sync with the layout reset.
 
-    This avoids the previous failure mode where the layout was replaced by a
-    smaller snapshot — e.g. if only 1 person spoke during the first window, only
-    1 tile would be recorded and all other participants would be invisible.
+    Between resets, tiles are accumulated: new speakers are merged in as they
+    are discovered, and positions that drift are updated in place.
     """
 
     def __init__(
         self,
         window: int = 10,
         drift_threshold: int = 80,
+        on_invalidate: "Callable[[], None] | None" = None,
     ) -> None:
         self._window = window
         self._drift_threshold = drift_threshold
+        self._on_invalidate = on_invalidate
         self._buffer: list[tuple[float, np.ndarray]] = []
-        self._tiles: list[TileRegion] = []   # accumulated across entire meeting
+        self._tiles: list[TileRegion] = []
         self._frame_shape: tuple[int, int] = (0, 0)
 
     @property
@@ -333,17 +405,28 @@ class LayoutTracker:
             frame_shape=self._frame_shape,
         )
 
+    def invalidate(self, timestamp: float, reason: str) -> None:
+        """Clear all accumulated tiles and notify the cache to soft-expire."""
+        log.info(
+            "Layout invalidated at %.1fs (%s) — clearing %d tile(s) and resetting",
+            timestamp, reason, len(self._tiles),
+        )
+        self._tiles.clear()
+        self._buffer.clear()
+        if self._on_invalidate:
+            self._on_invalidate()
+
     def update(self, timestamp: float, frame: np.ndarray) -> LayoutSnapshot | None:
-        """Feed a new frame; returns the accumulated LayoutSnapshot."""
+        """Feed a new frame; returns the current LayoutSnapshot."""
         self._buffer.append((timestamp, frame))
         if len(self._buffer) > self._window:
             self._buffer.pop(0)
 
-        if len(self._buffer) < max(2, self._window // 3):
-            return self.current  # not enough data yet
-
         if self._frame_shape == (0, 0):
             self._frame_shape = frame.shape[:2]
+
+        if len(self._buffer) < max(2, self._window // 3):
+            return self.current
 
         candidate = detect_layout(self._buffer)
         if candidate is None:
@@ -353,23 +436,11 @@ class LayoutTracker:
         return self.current
 
     def add_tile(self, tile: TileRegion, timestamp: float) -> None:
-        """Immediately merge a single confirmed tile into the accumulated layout.
-
-        Called by the pipeline when OCR successfully identifies a speaker found
-        via the secondary blob-scan path.  Once the tile is in the layout, future
-        frames will use the primary ``find_active_tiles`` path with a stable,
-        stored position rather than re-inferring a fresh tile each frame.
-        """
+        """Immediately merge a single confirmed tile into the accumulated layout."""
         self._merge([tile], timestamp)
 
     def _merge(self, new_tiles: list[TileRegion], timestamp: float) -> None:
-        """Merge newly detected tiles into the accumulated set.
-
-        For each new tile:
-        - If it is close to an existing tile (within drift_threshold), update
-          the existing tile's position if it has moved significantly.
-        - If it is far from all existing tiles, add it as a new participant.
-        """
+        """Merge newly detected tiles into the accumulated set."""
         for new_tile in new_tiles:
             closest: TileRegion | None = None
             closest_dist = float("inf")
@@ -380,14 +451,12 @@ class LayoutTracker:
                     closest = existing
 
             if closest is None or closest_dist > self._drift_threshold:
-                # Never-seen position — new participant tile
                 log.info(
                     "New participant tile at %.1fs: mic position (%d, %d)",
                     timestamp, new_tile.mic_x, new_tile.mic_y,
                 )
                 self._tiles.append(new_tile)
             elif closest_dist > self._drift_threshold / 2:
-                # Same participant, position has drifted — update in place
                 log.info(
                     "Tile position updated at %.1fs: moved %.0fpx",
                     timestamp, closest_dist,
