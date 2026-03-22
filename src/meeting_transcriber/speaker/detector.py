@@ -101,6 +101,13 @@ class _NameCache:
 
     def put(self, tile: TileRegion, name: str, confidence: float) -> None:
         key = self._key(tile)
+        # If this name is already known at a different position (layout reflow
+        # shifted the participant's tile), remove the stale entry so we don't
+        # accumulate duplicate keys for the same person.
+        for stale_key, (stale_name, _) in list(self._cache.items()):
+            if stale_name == name and stale_key != key:
+                del self._cache[stale_key]
+                break
         existing = self._cache.get(key)
         if existing is None or confidence > existing[1]:
             self._cache[key] = (name, confidence)
@@ -161,19 +168,40 @@ def ocr_tile_name(
     if not results:
         return "", 0.0
 
-    texts: list[str] = []
-    confidences: list[float] = []
-    for _bbox, text, conf in results:
-        if conf >= min_confidence:
-            texts.append(text)
-            confidences.append(conf)
+    # Filter to confident detections and compute each region's x-centre + area.
+    candidates: list[tuple[float, float, float, str]] = []  # (x_centre, area, conf, text)
+    for bbox, text, conf in results:
+        if conf < min_confidence:
+            continue
+        xs = [pt[0] for pt in bbox]
+        ys = [pt[1] for pt in bbox]
+        x_centre = float(np.mean(xs))
+        area = (max(xs) - min(xs)) * (max(ys) - min(ys))
+        candidates.append((x_centre, area, conf, text))
 
-    if not texts:
+    if not candidates:
         return "", 0.0
 
-    raw = " ".join(texts)
+    # Pick the region with the largest area as the primary name.
+    candidates.sort(key=lambda c: c[1], reverse=True)
+    primary_x, primary_area, primary_conf, primary_text = candidates[0]
+    primary_width = primary_area ** 0.5   # approximate
+
+    # Include any other regions that are horizontally adjacent to the primary
+    # (handles "First" and "Last" detected as separate regions by EasyOCR).
+    # Exclude regions that are far away — they belong to a neighbouring tile.
+    parts = [primary_text]
+    conf_values = [primary_conf]
+    for x_c, area, conf, text in candidates[1:]:
+        if abs(x_c - primary_x) <= max(primary_width, 80):
+            parts.append(text)
+            conf_values.append(conf)
+
+    # Sort parts left-to-right so "First Last" reads in the right order.
+    ordered = sorted(zip([c[0] for c in candidates[:len(parts)]], parts), key=lambda t: t[0])
+    raw = " ".join(p for _, p in ordered)
     name = _clean_name(raw)
-    avg_conf = float(np.mean(confidences)) if confidences else 0.0
+    avg_conf = float(np.mean(conf_values))
     return name, avg_conf
 
 
